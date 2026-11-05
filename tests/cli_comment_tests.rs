@@ -537,3 +537,107 @@ fn terminal_escape_sequences_in_a_comment_are_not_echoed() {
     assert!(!stdout.contains('\x1b'), "stdout:\n{stdout:?}");
     assert!(stdout.contains("red"), "stdout:\n{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// `--comments <mode>` and its relation to the `--with-*` shorthands
+// ---------------------------------------------------------------------------
+
+/// Files that `generate` produced, with content, relative to the output dir.
+fn snapshot(root: &Path) -> Vec<(String, String)> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                out.push((rel, fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out
+}
+
+#[test]
+fn comments_option_is_equivalent_to_each_shorthand() {
+    for (mode, shorthand) in [
+        ("files", "--with-file-comments"),
+        ("dirs", "--with-dir-comments"),
+        ("all", "--with-comments"),
+    ] {
+        let long = generate(&["--comments", mode]);
+        let short = generate(&[shorthand]);
+        assert_eq!(
+            snapshot(long.path()),
+            snapshot(short.path()),
+            "--comments {mode} must match {shorthand}"
+        );
+    }
+}
+
+#[test]
+fn comments_none_writes_nothing_and_matches_no_flags() {
+    let none = generate(&["--comments", "none"]);
+    let default = generate(&[]);
+    assert_eq!(snapshot(none.path()), snapshot(default.path()));
+}
+
+#[test]
+fn comments_option_conflicts_with_the_shorthands() {
+    for shorthand in [
+        "--with-comments",
+        "--with-file-comments",
+        "--with-dir-comments",
+    ] {
+        let input = TempDir::new().unwrap();
+        let tree_file = write_tree_file(&input, "tree.txt", TREE);
+
+        cmd()
+            .args(["--file", tree_file.to_str().unwrap()])
+            .args(["--comments", "files", shorthand])
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("cannot be used with"));
+    }
+}
+
+#[test]
+fn unknown_comments_mode_is_rejected_with_the_valid_values() {
+    cmd()
+        .args(["--comments", "everything"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("none"))
+        .stderr(predicates::str::contains("files"))
+        .stderr(predicates::str::contains("dirs"))
+        .stderr(predicates::str::contains("all"));
+}
+
+#[test]
+fn shorthands_may_be_combined_with_each_other() {
+    // `--with-comments` plus a specific shorthand is redundant, not a conflict.
+    let combined = generate(&["--with-comments", "--with-file-comments"]);
+    let all = generate(&["--with-comments"]);
+    assert_eq!(snapshot(combined.path()), snapshot(all.path()));
+}
+
+#[test]
+fn help_says_what_each_comment_flag_writes() {
+    let assert = cmd().arg("--help").assert().success();
+    let help = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+
+    for needle in [
+        "--comments <MODE>",
+        "COMMENT.md",
+        "--with-file-comments",
+        "--with-dir-comments",
+        "--with-comments",
+        "comment syntax",
+    ] {
+        assert!(help.contains(needle), "--help lacks {needle:?}:\n{help}");
+    }
+}

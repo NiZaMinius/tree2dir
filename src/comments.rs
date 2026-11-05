@@ -21,20 +21,23 @@
 
 use std::path::Path;
 
+use clap::ValueEnum;
+
 /// File that receives a directory's comment.
 pub(crate) const DIR_COMMENT_FILE: &str = "COMMENT.md";
 
 /// Which inline comments are persisted.  The default writes none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum CommentMode {
-    /// Comments are parsed and stripped from names but never written.
+    /// Strip comments from names but never save them (the default).
     #[default]
     None,
-    /// Write a file's comment into the file, in the syntax of its extension.
+    /// Write each file's comment into the file, in the comment syntax of its
+    /// extension. Files of unknown type stay empty.
     Files,
-    /// Write a directory's comment into `COMMENT.md` inside that directory.
+    /// Write each directory's comment to COMMENT.md inside that directory.
     Dirs,
-    /// Both of the above.
+    /// Write both file and directory comments.
     All,
 }
 

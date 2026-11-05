@@ -58,22 +58,44 @@ pub struct Cli {
     #[arg(long = "no-tui")]
     pub no_tui: bool,
 
-    /// Save comments after dir names into COMMENT.md in that dirs
+    /// Which inline `# comments` to save to disk.
+    ///
+    /// Comments after a name (`main.rs # entry point`) are always removed
+    /// from the name. By default they are discarded; this chooses what to
+    /// keep. Existing files and COMMENT.md files are never overwritten
+    /// without --force.
+    #[arg(
+        long = "comments",
+        value_name = "MODE",
+        value_enum,
+        conflicts_with_all = ["dir_comments", "file_comments", "with_comments"],
+    )]
+    pub comments: Option<CommentMode>,
+
+    /// Shorthand for `--comments dirs`: save directory comments to COMMENT.md
+    /// inside each directory.
     #[arg(long = "with-dir-comments")]
     pub dir_comments: bool,
 
-    /// Save comments after file names as a comment in that files
+    /// Shorthand for `--comments files`: save file comments inside the files,
+    /// in the comment syntax of their extension (other files stay empty).
     #[arg(long = "with-file-comments")]
     pub file_comments: bool,
 
-    /// Save comments after dir and file names
+    /// Shorthand for `--comments all`: save file and directory comments.
     #[arg(long = "with-comments")]
     pub with_comments: bool,
 }
 
 impl Cli {
     /// Resolve the comment-related flags into a single [`CommentMode`].
+    ///
+    /// `--comments` and the `--with-*` shorthands cannot be combined (clap
+    /// rejects it), so at most one of the two sources is set.
     pub fn comment_mode(&self) -> CommentMode {
+        if let Some(mode) = self.comments {
+            return mode;
+        }
         CommentMode::from_switches(
             self.file_comments || self.with_comments,
             self.dir_comments || self.with_comments,
