@@ -100,17 +100,15 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     let mut stats = BuildStats::default();
     let resolved = resolve_paths(nodes, &opts.output_root)?;
 
-    // Files the tree lists explicitly: a generated COMMENT.md must not
-    // collide with one of them.
-    let listed_files: HashSet<&Path> = resolved
-        .iter()
-        .filter(|entry| entry.kind == EntryKind::File)
-        .map(|entry| entry.path.as_path())
-        .collect();
+    // Everything the tree lists explicitly, files and directories alike: a
+    // generated COMMENT.md must not collide with any of it.  A listed
+    // directory named COMMENT.md would otherwise find a file in its place and
+    // abort the build.
+    let listed_paths: HashSet<&Path> = resolved.iter().map(|entry| entry.path.as_path()).collect();
 
     for entry in &resolved {
         match entry.kind {
-            EntryKind::Dir => create_directory(entry, opts, &listed_files, &mut stats)?,
+            EntryKind::Dir => create_directory(entry, opts, &listed_paths, &mut stats)?,
             EntryKind::File => create_file(entry, opts, &mut stats)?,
         }
     }
@@ -213,7 +211,7 @@ enum DirComment {
 fn plan_dir_comment(
     entry: &ResolvedEntry<'_>,
     opts: &BuildOptions,
-    listed_files: &HashSet<&Path>,
+    listed_paths: &HashSet<&Path>,
 ) -> DirComment {
     let Some(content) = entry
         .comment
@@ -224,7 +222,7 @@ fn plan_dir_comment(
     };
 
     let target = entry.path.join(DIR_COMMENT_FILE);
-    if listed_files.contains(target.as_path()) {
+    if listed_paths.contains(target.as_path()) {
         DirComment::ListedInTree { target }
     } else {
         DirComment::Write { target, content }
@@ -255,11 +253,11 @@ fn skip_listed_comment(target: &Path, stats: &mut BuildStats) {
 fn create_directory(
     entry: &ResolvedEntry<'_>,
     opts: &BuildOptions,
-    listed_files: &HashSet<&Path>,
+    listed_paths: &HashSet<&Path>,
     stats: &mut BuildStats,
 ) -> Result<(), AppError> {
     let path = &entry.path;
-    let comment = plan_dir_comment(entry, opts, listed_files);
+    let comment = plan_dir_comment(entry, opts, listed_paths);
 
     if opts.dry_run {
         println!("  [dry-run] 📁 {}", path.display());

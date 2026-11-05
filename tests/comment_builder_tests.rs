@@ -620,3 +620,19 @@ fn dry_run_counts_planned_comments_without_writing_them() {
     assert_eq!(stats.comments_written, 2, "would write two comments");
     assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn listed_comment_md_directory_wins_over_the_directory_comment() {
+    // A directory named COMMENT.md is just as much "listed in the tree" as a
+    // file: writing the generated file first made the later create_dir_all fail
+    // and aborted the build half way.
+    let out = TempDir::new().unwrap();
+    let tree = "src/ # about src\n└── COMMENT.md/\n";
+
+    let stats = build(&parse_tree(tree), &opts(out.path(), false, true)).unwrap();
+
+    assert!(out.path().join("src/COMMENT.md").is_dir());
+    assert_eq!(stats.dirs_created, 2);
+    assert_eq!(stats.comments_written, 0);
+    assert_eq!(stats.comments_skipped, 1);
+}

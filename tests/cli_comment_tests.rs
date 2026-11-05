@@ -641,3 +641,15 @@ fn help_says_what_each_comment_flag_writes() {
         assert!(help.contains(needle), "--help lacks {needle:?}:\n{help}");
     }
 }
+
+#[test]
+fn listed_comment_md_directory_is_a_warning_not_a_failed_build() {
+    let tree = "docs/ # about docs\n└── COMMENT.md/\n    └── a.rs\n";
+    let (_, stderr, output) = run_and_capture(&["--with-dir-comments"], tree);
+
+    assert!(
+        stderr.contains("is listed in the tree"),
+        "stderr:\n{stderr}"
+    );
+    assert!(output.path().join("docs/COMMENT.md/a.rs").is_file());
+}
