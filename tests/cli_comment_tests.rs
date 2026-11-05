@@ -388,3 +388,152 @@ cfg/
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reporting: dry-run, warnings, summary
+// ---------------------------------------------------------------------------
+
+fn run_and_capture(args: &[&str], tree: &str) -> (String, String, TempDir) {
+    let input = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let tree_file = write_tree_file(&input, "tree.txt", tree);
+
+    let assert = cmd()
+        .args(["--file", tree_file.to_str().unwrap()])
+        .args(["--output", output.path().to_str().unwrap()])
+        .args(args)
+        .assert()
+        .success();
+    let out = assert.get_output();
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        output,
+    )
+}
+
+#[test]
+fn dry_run_reports_the_comments_it_would_write() {
+    let (stdout, _, output) = run_and_capture(&["--with-comments", "--dry-run"], TREE);
+
+    assert!(
+        stdout.contains("COMMENT.md: the project"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("COMMENT.md: source code"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("comment: // entry point"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("comment: <!-- docs -->"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Would write 4 comments."),
+        "stdout:\n{stdout}"
+    );
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn real_run_summary_counts_written_comments() {
+    let (stdout, _, _out) = run_and_capture(&["--with-comments"], TREE);
+
+    assert!(stdout.contains("Wrote 4 comments."), "stdout:\n{stdout}");
+}
+
+#[test]
+fn no_flags_means_no_comment_lines_in_the_summary() {
+    let (stdout, _, _out) = run_and_capture(&[], TREE);
+
+    assert!(!stdout.contains("Wrote"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("↳"), "stdout:\n{stdout}");
+}
+
+#[test]
+fn listed_comment_md_is_reported_as_a_warning_not_an_error() {
+    let tree = "docs/ # about docs\n└── COMMENT.md\n";
+    let (_, stderr, output) = run_and_capture(&["--with-dir-comments"], tree);
+
+    assert!(
+        stderr.contains("is listed in the tree"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(read(output.path().join("docs/COMMENT.md")), "");
+}
+
+#[test]
+fn second_run_keeps_every_file_and_warns() {
+    let input = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let tree_file = write_tree_file(&input, "tree.txt", TREE);
+
+    let run = || {
+        cmd()
+            .args(["--file", tree_file.to_str().unwrap()])
+            .args(["--output", output.path().to_str().unwrap()])
+            .arg("--with-comments")
+            .assert()
+            .success()
+    };
+    run();
+    let second = run();
+    let stderr = String::from_utf8_lossy(&second.get_output().stderr).into_owned();
+
+    assert!(stderr.contains("already exists"), "stderr:\n{stderr}");
+    assert_eq!(
+        read(output.path().join("project/src/main.rs")),
+        "// entry point\n"
+    );
+    assert_eq!(
+        read(output.path().join("project/src/COMMENT.md")),
+        "source code\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Input quirks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crlf_input_never_leaks_into_names_or_comments() {
+    let tree = "app/ # the app\r\n├── main.py # run me\r\n└── lib.rs # core\r\n";
+    let (_, _, output) = run_and_capture(&["--with-comments"], tree);
+
+    assert_eq!(read(output.path().join("app/COMMENT.md")), "the app\n");
+    assert_eq!(read(output.path().join("app/main.py")), "# run me\n");
+    assert_eq!(read(output.path().join("app/lib.rs")), "// core\n");
+}
+
+#[test]
+fn tab_before_hash_works_end_to_end() {
+    let (_, _, output) = run_and_capture(&["--with-file-comments"], "main.rs\t# entry\n");
+
+    assert_eq!(read(output.path().join("main.rs")), "// entry\n");
+    assert!(!output.path().join("main.rs\t# entry").exists());
+}
+
+#[test]
+fn comment_only_line_inside_a_glyph_tree_creates_nothing() {
+    let tree = "root/\n│   # helpers live here\n├── a.rs\n";
+    let (_, _, output) = run_and_capture(&[], tree);
+
+    let names: Vec<_> = fs::read_dir(output.path().join("root"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("a.rs")]);
+}
+
+#[test]
+fn terminal_escape_sequences_in_a_comment_are_not_echoed() {
+    let tree = "a.rs # \x1b[31mred\x1b[0m\n";
+    let (stdout, _, _out) = run_and_capture(&[], tree);
+
+    assert!(!stdout.contains('\x1b'), "stdout:\n{stdout:?}");
+    assert!(stdout.contains("red"), "stdout:\n{stdout}");
+}

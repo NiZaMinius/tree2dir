@@ -248,6 +248,8 @@ root/ # top level
             dirs_created: 2,
             files_created: 1,
             files_skipped: 0,
+            comments_written: 3,
+            comments_skipped: 0,
         }
     );
 }
@@ -474,4 +476,147 @@ fn directory_comment_with_a_line_break_stays_on_one_line() {
         read(out.path().join("src/COMMENT.md")),
         "line one line two\n"
     );
+}
+
+// ---------------------------------------------------------------------------
+// COMMENT.md conflicts
+// ---------------------------------------------------------------------------
+
+fn forced(root: &Path, file_comments: bool, dir_comments: bool) -> BuildOptions {
+    BuildOptions {
+        force: true,
+        ..opts(root, file_comments, dir_comments)
+    }
+}
+
+#[test]
+fn existing_comment_md_is_not_overwritten_without_force() {
+    let out = TempDir::new().unwrap();
+    fs::create_dir(out.path().join("src")).unwrap();
+    fs::write(out.path().join("src/COMMENT.md"), "hand written\n").unwrap();
+
+    let stats = build(
+        &parse_tree("src/ # generated"),
+        &opts(out.path(), false, true),
+    )
+    .unwrap();
+
+    assert_eq!(read(out.path().join("src/COMMENT.md")), "hand written\n");
+    assert_eq!(stats.comments_written, 0);
+    assert_eq!(stats.comments_skipped, 1);
+    assert_eq!(stats.dirs_created, 0, "the directory already existed");
+}
+
+#[test]
+fn existing_comment_md_is_overwritten_with_force() {
+    let out = TempDir::new().unwrap();
+    fs::create_dir(out.path().join("src")).unwrap();
+    fs::write(out.path().join("src/COMMENT.md"), "hand written\n").unwrap();
+
+    let stats = build(
+        &parse_tree("src/ # generated"),
+        &forced(out.path(), false, true),
+    )
+    .unwrap();
+
+    assert_eq!(read(out.path().join("src/COMMENT.md")), "generated\n");
+    assert_eq!(stats.comments_written, 1);
+    assert_eq!(stats.comments_skipped, 0);
+}
+
+#[test]
+fn comment_md_listed_in_the_tree_wins_over_the_directory_comment() {
+    let out = TempDir::new().unwrap();
+    let tree = "src/ # about src\n└── COMMENT.md # mine\n";
+
+    let stats = build(&parse_tree(tree), &opts(out.path(), true, true)).unwrap();
+
+    // The listed entry is created by the normal file rules, with its own
+    // comment, and is not reported as skipped.
+    assert_eq!(read(out.path().join("src/COMMENT.md")), "<!-- mine -->\n");
+    assert_eq!(stats.files_created, 1);
+    assert_eq!(stats.files_skipped, 0);
+    assert_eq!(stats.comments_skipped, 1);
+}
+
+#[test]
+fn listed_comment_md_without_a_comment_of_its_own_stays_empty() {
+    // The listed entry is still the one that decides the file's content.
+    let out = TempDir::new().unwrap();
+    let tree = "docs/ # about docs\n├── COMMENT.md\n└── a.md\n";
+
+    let stats = build(&parse_tree(tree), &opts(out.path(), false, true)).unwrap();
+
+    assert_eq!(read(out.path().join("docs/COMMENT.md")), "");
+    assert_eq!(stats.comments_skipped, 1);
+    assert_eq!(stats.comments_written, 0);
+}
+
+#[test]
+fn listed_comment_md_wins_even_with_force() {
+    let out = TempDir::new().unwrap();
+    let tree = "docs/ # about docs\n└── COMMENT.md\n";
+
+    build(&parse_tree(tree), &forced(out.path(), false, true)).unwrap();
+
+    assert_eq!(read(out.path().join("docs/COMMENT.md")), "");
+}
+
+#[test]
+fn second_run_with_comments_changes_nothing() {
+    let out = TempDir::new().unwrap();
+    let nodes = parse_tree(MIXED_TREE);
+    let options = opts(out.path(), true, true);
+
+    let first = build(&nodes, &options).unwrap();
+    assert_eq!(first.comments_written, 2);
+
+    let second = build(&nodes, &options).unwrap();
+
+    assert_eq!(
+        second,
+        BuildStats {
+            dirs_created: 0,
+            files_created: 0,
+            files_skipped: 1,
+            comments_written: 0,
+            comments_skipped: 1,
+        }
+    );
+    assert_eq!(read(out.path().join("proj/main.rs")), "// entry\n");
+    assert_eq!(read(out.path().join("proj/COMMENT.md")), "the project\n");
+}
+
+#[test]
+fn directory_comment_is_added_to_a_directory_that_already_exists() {
+    let out = TempDir::new().unwrap();
+    fs::create_dir(out.path().join("src")).unwrap();
+
+    let stats = build(
+        &parse_tree("src/ # late note"),
+        &opts(out.path(), false, true),
+    )
+    .unwrap();
+
+    assert_eq!(read(out.path().join("src/COMMENT.md")), "late note\n");
+    assert_eq!(stats.dirs_created, 0);
+    assert_eq!(stats.comments_written, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Dry run reports planned comments
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dry_run_counts_planned_comments_without_writing_them() {
+    let out = TempDir::new().unwrap();
+    let options = BuildOptions {
+        dry_run: true,
+        ..opts(out.path(), true, true)
+    };
+
+    let stats = build(&parse_tree(MIXED_TREE), &options).unwrap();
+
+    assert_eq!(stats.comments_written, 2, "would write two comments");
+    assert_eq!(fs::read_dir(out.path()).unwrap().count(), 0);
 }
