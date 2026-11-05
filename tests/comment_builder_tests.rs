@@ -9,8 +9,8 @@
 //! - `CommentMode::Files`: the comment is written *into* the file, formatted with
 //!   the comment syntax of its extension. Binary / extension-less files stay
 //!   empty.
-//! - `CommentMode::Dirs`: the comment is written, unformatted, to `COMMENT.md`
-//!   inside the new directory.
+//! - `CommentMode::Dirs`: the comment is written as plain text to `COMMENT.md`
+//!   inside the directory.
 
 use std::fs;
 use std::path::Path;
@@ -60,7 +60,7 @@ fn file_comment_uses_comment_syntax_of_the_extension() {
         ("a.yml", "# note"),
         ("a.yaml", "# note"),
         ("a.toml", "# note"),
-        ("a.ini", "# note"),
+        ("a.ini", "; note"),
         // Double dash
         ("a.sql", "-- note"),
         ("a.lua", "-- note"),
@@ -70,9 +70,6 @@ fn file_comment_uses_comment_syntax_of_the_extension() {
         ("a.xml", "<!-- note -->"),
         ("a.svg", "<!-- note -->"),
         ("a.md", "<!-- note -->"),
-        // Unknown extension falls back to `//`
-        ("a.txt", "// note"),
-        ("a.weird", "// note"),
         // Extension matching is case-insensitive
         ("UPPER.PY", "# note"),
         ("Mixed.Md", "<!-- note -->"),
@@ -90,21 +87,22 @@ fn file_comment_uses_comment_syntax_of_the_extension() {
     for (name, expected) in cases {
         assert_eq!(
             read(out.path().join(name)),
-            *expected,
+            format!("{expected}\n"),
             "wrong comment format for {name}"
         );
     }
 }
 
 #[test]
-fn file_comment_has_no_trailing_newline_and_no_extra_content() {
+fn file_comment_is_one_line_ending_in_exactly_one_newline() {
     let out = TempDir::new().unwrap();
     let nodes = parse_tree("main.rs # entry point");
     build(&nodes, &opts(out.path(), true, false)).unwrap();
 
     assert_eq!(
         fs::read(out.path().join("main.rs")).unwrap(),
-        b"// entry point"
+        b"// entry point
+"
     );
 }
 
@@ -114,7 +112,7 @@ fn file_comment_keeps_unicode_intact() {
     let nodes = parse_tree("a.py # 日本語 ✓ привет");
     build(&nodes, &opts(out.path(), true, false)).unwrap();
 
-    assert_eq!(read(out.path().join("a.py")), "# 日本語 ✓ привет");
+    assert_eq!(read(out.path().join("a.py")), "# 日本語 ✓ привет\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -194,15 +192,15 @@ fn file_comments_disabled_creates_empty_file() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dir_comment_is_written_verbatim_to_comment_md() {
+fn dir_comment_is_written_as_plain_text_to_comment_md() {
     let out = TempDir::new().unwrap();
     let nodes = parse_tree("src/ # source code");
     build(&nodes, &opts(out.path(), false, true)).unwrap();
 
     let comment_file = out.path().join("src").join("COMMENT.md");
     assert!(comment_file.is_file(), "src/COMMENT.md should exist");
-    // Not wrapped in <!-- --> and no trailing newline.
-    assert_eq!(read(comment_file), "source code");
+    // Plain text (not wrapped in <!-- -->) ending in one newline.
+    assert_eq!(read(comment_file), "source code\n");
 }
 
 #[test]
@@ -236,9 +234,12 @@ root/ # top level
     let nodes = parse_tree(tree);
     let stats = build(&nodes, &opts(out.path(), true, true)).unwrap();
 
-    assert_eq!(read(out.path().join("root/COMMENT.md")), "top level");
-    assert_eq!(read(out.path().join("root/src/COMMENT.md")), "inner level");
-    assert_eq!(read(out.path().join("root/src/main.rs")), "// entry");
+    assert_eq!(read(out.path().join("root/COMMENT.md")), "top level\n");
+    assert_eq!(
+        read(out.path().join("root/src/COMMENT.md")),
+        "inner level\n"
+    );
+    assert_eq!(read(out.path().join("root/src/main.rs")), "// entry\n");
 
     // COMMENT.md files are side effects, not counted as tree entries.
     assert_eq!(
@@ -257,7 +258,7 @@ fn dir_comment_for_quoted_dir_with_spaces() {
     let nodes = parse_tree("\"my docs/\" # user docs");
     build(&nodes, &opts(out.path(), false, true)).unwrap();
 
-    assert_eq!(read(out.path().join("my docs/COMMENT.md")), "user docs");
+    assert_eq!(read(out.path().join("my docs/COMMENT.md")), "user docs\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +275,7 @@ fn file_comments_only_does_not_write_dir_comments() {
     let out = TempDir::new().unwrap();
     build(&parse_tree(MIXED_TREE), &opts(out.path(), true, false)).unwrap();
 
-    assert_eq!(read(out.path().join("proj/main.rs")), "// entry");
+    assert_eq!(read(out.path().join("proj/main.rs")), "// entry\n");
     assert!(!out.path().join("proj/COMMENT.md").exists());
 }
 
@@ -283,7 +284,7 @@ fn dir_comments_only_does_not_write_file_comments() {
     let out = TempDir::new().unwrap();
     build(&parse_tree(MIXED_TREE), &opts(out.path(), false, true)).unwrap();
 
-    assert_eq!(read(out.path().join("proj/COMMENT.md")), "the project");
+    assert_eq!(read(out.path().join("proj/COMMENT.md")), "the project\n");
     assert_eq!(read(out.path().join("proj/main.rs")), "");
 }
 
@@ -292,8 +293,8 @@ fn both_options_write_both_kinds_of_comment() {
     let out = TempDir::new().unwrap();
     build(&parse_tree(MIXED_TREE), &opts(out.path(), true, true)).unwrap();
 
-    assert_eq!(read(out.path().join("proj/COMMENT.md")), "the project");
-    assert_eq!(read(out.path().join("proj/main.rs")), "// entry");
+    assert_eq!(read(out.path().join("proj/COMMENT.md")), "the project\n");
+    assert_eq!(read(out.path().join("proj/main.rs")), "// entry\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +328,7 @@ fn force_overwrites_existing_file_with_comment() {
     o.force = true;
     let stats = build(&parse_tree("main.rs # entry"), &o).unwrap();
 
-    assert_eq!(read(&target), "// entry");
+    assert_eq!(read(&target), "// entry\n");
     assert_eq!(stats.files_created, 1);
     assert_eq!(stats.files_skipped, 0);
 }
@@ -343,4 +344,134 @@ fn dry_run_with_comments_writes_nothing() {
     assert!(!out.path().join("proj").exists());
     assert_eq!(stats.dirs_created, 1, "dry-run still reports planned work");
     assert_eq!(stats.files_created, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Allowlist: only known comment syntaxes are written
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unknown_extensions_are_created_empty() {
+    let out = TempDir::new().unwrap();
+    let names = [
+        "notes.txt",
+        "a.weird",
+        "data.json",
+        "style.css",
+        "settings.env",
+        "logo.gif",
+        "favicon.ico",
+        "manual.pdf",
+        "font.ttf",
+        "app.jar",
+        "Makefile",
+    ];
+    let tree: String = names.iter().map(|n| format!("{n} # a note\n")).collect();
+
+    let stats = build(&parse_tree(&tree), &opts(out.path(), true, true)).unwrap();
+
+    assert_eq!(stats.files_created, names.len());
+    for name in names {
+        assert_eq!(
+            fs::metadata(out.path().join(name)).unwrap().len(),
+            0,
+            "{name} must stay empty: its comment syntax is not known"
+        );
+    }
+}
+
+#[test]
+fn json_is_never_given_a_comment() {
+    let out = TempDir::new().unwrap();
+    build(
+        &parse_tree("data.json # fixtures"),
+        &opts(out.path(), true, false),
+    )
+    .unwrap();
+
+    let content = read(out.path().join("data.json"));
+    assert!(
+        !content.contains("//") && !content.contains('#'),
+        "a comment would make the file invalid JSON: {content:?}"
+    );
+    assert_eq!(content, "");
+}
+
+#[test]
+fn ini_uses_semicolon_comments() {
+    let out = TempDir::new().unwrap();
+    build(
+        &parse_tree("settings.ini # defaults"),
+        &opts(out.path(), true, false),
+    )
+    .unwrap();
+
+    assert_eq!(read(out.path().join("settings.ini")), "; defaults\n");
+}
+
+#[test]
+fn php_comment_is_placed_inside_php_tags() {
+    let out = TempDir::new().unwrap();
+    build(
+        &parse_tree("index.php # front controller"),
+        &opts(out.path(), true, false),
+    )
+    .unwrap();
+
+    assert_eq!(
+        read(out.path().join("index.php")),
+        "<?php\n// front controller\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe comment content
+// ---------------------------------------------------------------------------
+
+#[test]
+fn html_comment_cannot_be_closed_by_its_own_text() {
+    let out = TempDir::new().unwrap();
+    build(
+        &parse_tree("page.html # a --> <script>alert(1)</script>"),
+        &opts(out.path(), true, false),
+    )
+    .unwrap();
+
+    let content = read(out.path().join("page.html"));
+    let inner = content
+        .strip_prefix("<!-- ")
+        .and_then(|s| s.strip_suffix(" -->\n"))
+        .expect("still a single well-formed comment");
+    assert!(!inner.contains("--"), "{content:?}");
+}
+
+#[test]
+fn comment_with_a_line_break_stays_on_one_line() {
+    // A parsed tree cannot produce this, but library callers can build nodes
+    // by hand; a line break in a `.py` comment would be code injection.
+    use tree2dir::parser::tree_node::{EntryKind, TreeNode};
+
+    let out = TempDir::new().unwrap();
+    let node = TreeNode::new(0, "run.py", EntryKind::File)
+        .with_comment(Some("setup\nimport os; os.system('rm -rf /')".to_string()));
+    build(&[node], &opts(out.path(), true, false)).unwrap();
+
+    let content = read(out.path().join("run.py"));
+    assert_eq!(content, "# setup import os; os.system('rm -rf /')\n");
+    assert_eq!(content.lines().count(), 1);
+}
+
+#[test]
+fn directory_comment_with_a_line_break_stays_on_one_line() {
+    use tree2dir::parser::tree_node::{EntryKind, TreeNode};
+
+    let out = TempDir::new().unwrap();
+    let node = TreeNode::new(0, "src", EntryKind::Dir)
+        .with_comment(Some("line one\nline two".to_string()));
+    build(&[node], &opts(out.path(), false, true)).unwrap();
+
+    assert_eq!(
+        read(out.path().join("src/COMMENT.md")),
+        "line one line two\n"
+    );
 }

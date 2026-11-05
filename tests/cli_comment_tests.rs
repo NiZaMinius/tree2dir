@@ -94,8 +94,8 @@ fn with_file_comments_writes_comments_into_files_only() {
     let out = generate(&["--with-file-comments"]);
     let root = out.path().join("project");
 
-    assert_eq!(read(root.join("src/main.rs")), "// entry point");
-    assert_eq!(read(root.join("README.md")), "<!-- docs -->");
+    assert_eq!(read(root.join("src/main.rs")), "// entry point\n");
+    assert_eq!(read(root.join("README.md")), "<!-- docs -->\n");
 
     // File without a comment stays empty.
     assert_eq!(read(root.join("notes.txt")), "");
@@ -116,8 +116,8 @@ fn with_dir_comments_writes_comment_md_only() {
     let out = generate(&["--with-dir-comments"]);
     let root = out.path().join("project");
 
-    assert_eq!(read(root.join("COMMENT.md")), "the project");
-    assert_eq!(read(root.join("src/COMMENT.md")), "source code");
+    assert_eq!(read(root.join("COMMENT.md")), "the project\n");
+    assert_eq!(read(root.join("src/COMMENT.md")), "source code\n");
 
     // File comments were not requested.
     assert_eq!(read(root.join("src/main.rs")), "");
@@ -133,10 +133,10 @@ fn with_comments_enables_file_and_dir_comments() {
     let out = generate(&["--with-comments"]);
     let root = out.path().join("project");
 
-    assert_eq!(read(root.join("COMMENT.md")), "the project");
-    assert_eq!(read(root.join("src/COMMENT.md")), "source code");
-    assert_eq!(read(root.join("src/main.rs")), "// entry point");
-    assert_eq!(read(root.join("README.md")), "<!-- docs -->");
+    assert_eq!(read(root.join("COMMENT.md")), "the project\n");
+    assert_eq!(read(root.join("src/COMMENT.md")), "source code\n");
+    assert_eq!(read(root.join("src/main.rs")), "// entry point\n");
+    assert_eq!(read(root.join("README.md")), "<!-- docs -->\n");
     assert_eq!(read(root.join("notes.txt")), "");
     assert_eq!(fs::metadata(root.join("src/data.zip")).unwrap().len(), 0);
 }
@@ -205,7 +205,7 @@ fn force_overwrites_existing_file_with_its_comment() {
         .assert()
         .success();
 
-    assert_eq!(read(&target), "<!-- docs -->");
+    assert_eq!(read(&target), "<!-- docs -->\n");
 }
 
 #[test]
@@ -242,8 +242,8 @@ fn pipe_mode_supports_comments() {
         .assert()
         .success();
 
-    assert_eq!(read(output.path().join("app/COMMENT.md")), "the app");
-    assert_eq!(read(output.path().join("app/main.py")), "# run me");
+    assert_eq!(read(output.path().join("app/COMMENT.md")), "the app\n");
+    assert_eq!(read(output.path().join("app/main.py")), "# run me\n");
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn quoted_names_with_spaces_and_comments() {
     let output = TempDir::new().unwrap();
     let tree = "\
 root/
-├── \"my file.txt\" # spaced name
+├── \"my file.rs\" # spaced name
 └── 'other file.md' # single quoted
 ";
     let tree_file = write_tree_file(&input, "tree.txt", tree);
@@ -265,12 +265,12 @@ root/
         .success();
 
     assert_eq!(
-        read(output.path().join("root/my file.txt")),
-        "// spaced name"
+        read(output.path().join("root/my file.rs")),
+        "// spaced name\n"
     );
     assert_eq!(
         read(output.path().join("root/other file.md")),
-        "<!-- single quoted -->"
+        "<!-- single quoted -->\n"
     );
 }
 
@@ -282,7 +282,7 @@ fn full_line_comments_do_not_become_entries() {
 # header comment
 root/
 # a note between entries
-└── a.txt # real comment
+└── a.rs # real comment
 ";
     let tree_file = write_tree_file(&input, "tree.txt", tree);
 
@@ -303,8 +303,8 @@ root/
         .unwrap()
         .map(|e| e.unwrap().file_name())
         .collect();
-    assert_eq!(root_entries, vec![std::ffi::OsString::from("a.txt")]);
-    assert_eq!(read(output.path().join("root/a.txt")), "// real comment");
+    assert_eq!(root_entries, vec![std::ffi::OsString::from("a.rs")]);
+    assert_eq!(read(output.path().join("root/a.rs")), "// real comment\n");
 }
 
 #[test]
@@ -320,7 +320,7 @@ fn unicode_comments_survive_the_round_trip() {
         .assert()
         .success();
 
-    assert_eq!(read(output.path().join("a.py")), "# 日本語 ✓ привет");
+    assert_eq!(read(output.path().join("a.py")), "# 日本語 ✓ привет\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -352,4 +352,39 @@ fn summary_tree_shows_comments() {
         stdout.contains("project\t# the project"),
         "stdout was:\n{stdout}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Allowlist
+// ---------------------------------------------------------------------------
+
+#[test]
+fn files_with_unknown_syntax_stay_empty_through_the_cli() {
+    let input = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let tree = "\
+cfg/
+├── data.json # fixtures
+├── style.css # theme
+├── notes.txt # scratch
+└── Makefile # build
+";
+    let tree_file = write_tree_file(&input, "tree.txt", tree);
+
+    cmd()
+        .args(["--file", tree_file.to_str().unwrap()])
+        .args(["--output", output.path().to_str().unwrap()])
+        .arg("--with-comments")
+        .assert()
+        .success();
+
+    for name in ["data.json", "style.css", "notes.txt", "Makefile"] {
+        assert_eq!(
+            fs::metadata(output.path().join("cfg").join(name))
+                .unwrap()
+                .len(),
+            0,
+            "{name} must stay empty"
+        );
+    }
 }

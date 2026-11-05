@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-    comments::{format_comment, is_commentable, CommentMode},
+    comments::{format_dir_comment, format_file_comment, CommentMode, DIR_COMMENT_FILE},
     error::AppError,
     parser::tree_node::{EntryKind, TreeNode},
 };
@@ -183,12 +183,13 @@ fn create_directory(
         fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
         stats.dirs_created += 1;
     }
-    if opts.comments.dirs() {
-        if let Some(comment_str) = comment.filter(|s| !s.is_empty()) {
-            let comment_path = &path.join("COMMENT.md");
-            if !comment_path.exists() {
-                fs::write(comment_path, comment_str).map_err(|e| AppError::io(comment_path, e))?;
-            }
+    if let Some(content) = comment
+        .filter(|_| opts.comments.dirs())
+        .and_then(format_dir_comment)
+    {
+        let comment_path = path.join(DIR_COMMENT_FILE);
+        if !comment_path.exists() {
+            fs::write(&comment_path, content).map_err(|e| AppError::io(&comment_path, e))?;
         }
     }
 
@@ -223,12 +224,11 @@ fn create_file(
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    let to_write = comment
+    let content = comment
         .filter(|_| opts.comments.files())
-        .filter(|s| !s.is_empty() && is_commentable(path))
-        .map(|s| format_comment(path, s.to_string()))
+        .and_then(|c| format_file_comment(path, c))
         .unwrap_or_default();
-    fs::write(path, to_write).map_err(|e| AppError::io(path, e))?;
+    fs::write(path, content).map_err(|e| AppError::io(path, e))?;
     stats.files_created += 1;
     Ok(())
 }
