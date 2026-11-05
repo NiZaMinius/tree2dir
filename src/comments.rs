@@ -72,12 +72,6 @@ enum Syntax {
         prefix: &'static str,
         preamble: &'static str,
     },
-    /// `<open> text <close>`.  The closing token is defused if the text
-    /// contains it.
-    Block {
-        open: &'static str,
-        close: &'static str,
-    },
     /// `<!-- text -->`.  XML forbids `--` inside a comment, so every run of
     /// hyphens is broken up, which also covers `-->` and `--!>`.
     Markup,
@@ -103,15 +97,12 @@ const SEMICOLON: Syntax = Syntax::Line {
     prefix: ";",
     preamble: "",
 };
-const OCAML: Syntax = Syntax::Block {
-    open: "(*",
-    close: "*)",
-};
-
 /// Extensions (lowercase, no dot) whose comment syntax is known.
 ///
 /// Deliberately absent: `json` (no comments), `css` (block comments only,
-/// left empty by design), `txt`, `cfg`, `conf`, `env` (dialects disagree).
+/// left empty by design), `txt`, `cfg`, `conf`, `env` (dialects disagree), and
+/// `ml`/`mli`: OCaml comments nest and its lexer reads string literals inside
+/// them, so no arbitrary text is safe to embed.
 #[rustfmt::skip]
 const ALLOWLIST: &[(Syntax, &[&str])] = &[
     (SLASHES, &[
@@ -126,7 +117,6 @@ const ALLOWLIST: &[(Syntax, &[&str])] = &[
     ]),
     (DASHES, &["sql", "lua", "hs"]),
     (SEMICOLON, &["ini"]),
-    (OCAML, &["ml", "mli"]),
     (Syntax::Markup, &["html", "htm", "xml", "svg", "md", "markdown"]),
 ];
 
@@ -176,24 +166,9 @@ fn break_hyphen_runs(text: &str) -> String {
     out
 }
 
-/// Replace every occurrence of `token` by a spaced-out copy (`*/` → `* /`).
-fn defuse(text: &str, token: &str) -> String {
-    let Some(first) = token.chars().next() else {
-        return text.to_string();
-    };
-    let spaced = format!("{first} {}", &token[first.len_utf8()..]);
-    let mut out = text.to_string();
-    // Inserting a space can never create a new occurrence, so this ends.
-    while out.contains(token) {
-        out = out.replace(token, &spaced);
-    }
-    out
-}
-
 fn render(syntax: Syntax, text: &str) -> String {
     match syntax {
         Syntax::Line { prefix, preamble } => format!("{preamble}{prefix} {text}\n"),
-        Syntax::Block { open, close } => format!("{open} {} {close}\n", defuse(text, close)),
         Syntax::Markup => format!("<!-- {} -->\n", break_hyphen_runs(text)),
     }
 }
@@ -240,7 +215,6 @@ mod tests {
         assert_eq!(file("a.py", "x").as_deref(), Some("# x\n"));
         assert_eq!(file("a.sql", "x").as_deref(), Some("-- x\n"));
         assert_eq!(file("a.ini", "x").as_deref(), Some("; x\n"));
-        assert_eq!(file("a.ml", "x").as_deref(), Some("(* x *)\n"));
         assert_eq!(file("a.html", "x").as_deref(), Some("<!-- x -->\n"));
     }
 
@@ -267,6 +241,9 @@ mod tests {
             "lib.jar",
             "a.zip",
             "a.png",
+            // OCaml: nesting comments and string literals inside them.
+            "a.ml",
+            "a.mli",
         ] {
             assert_eq!(file(name, "x"), None, "{name} must stay empty");
         }
@@ -335,14 +312,6 @@ mod tests {
             file("a.md", "state-of-the-art").unwrap(),
             "<!-- state-of-the-art -->\n"
         );
-    }
-
-    #[test]
-    fn block_comment_close_token_is_defused() {
-        assert_eq!(file("a.ml", "a *) b").unwrap(), "(* a * ) b *)\n");
-        // The helper also protects `*/`-style blocks should `css` ever be allowed.
-        assert_eq!(defuse("a */ b */", "*/"), "a * / b * /");
-        assert_eq!(defuse("**//", "*/"), "** //");
     }
 
     #[test]

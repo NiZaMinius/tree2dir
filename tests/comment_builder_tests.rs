@@ -636,3 +636,21 @@ fn listed_comment_md_directory_wins_over_the_directory_comment() {
     assert_eq!(stats.comments_written, 0);
     assert_eq!(stats.comments_skipped, 1);
 }
+
+#[test]
+fn ocaml_files_stay_empty_because_no_text_is_safe_in_their_comments() {
+    // OCaml comments nest and its lexer reads string literals inside them, so
+    // both `(*` and a lone `"` in a comment make the file fail to compile.
+    let out = TempDir::new().unwrap();
+    let tree = "a.ml # uses (* open\nb.mli # say \"hi\n";
+
+    build(&parse_tree(tree), &opts(out.path(), true, false)).unwrap();
+
+    for name in ["a.ml", "b.mli"] {
+        assert_eq!(
+            fs::metadata(out.path().join(name)).unwrap().len(),
+            0,
+            "{name}"
+        );
+    }
+}
