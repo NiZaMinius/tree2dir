@@ -70,10 +70,10 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     let mut stats = BuildStats::default();
     let resolved = resolve_paths(nodes, &opts.output_root)?;
 
-    for (full_path, kind, _name, _indent, comment) in resolved {
-        match kind {
-            EntryKind::Dir => create_directory(&full_path, opts, &mut stats, comment)?,
-            EntryKind::File => create_file(&full_path, opts, &mut stats, comment)?,
+    for entry in resolved {
+        match entry.kind {
+            EntryKind::Dir => create_directory(&entry.path, opts, &mut stats, entry.comment)?,
+            EntryKind::File => create_file(&entry.path, opts, &mut stats, entry.comment)?,
         }
     }
 
@@ -142,10 +142,24 @@ fn ensure_within_root(full_path: &Path, root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn resolve_paths(
-    nodes: &[TreeNode],
+/// A [`TreeNode`] joined onto the output root, ready to be created or printed.
+///
+/// Borrows from the node list so resolving a large tree does not clone every
+/// name and comment.
+struct ResolvedEntry<'a> {
+    /// Absolute-or-relative path under the output root.
+    path: PathBuf,
+    kind: EntryKind,
+    name: &'a str,
+    /// Number of ancestor directories, used only to indent the printed tree.
+    indent_level: usize,
+    comment: Option<&'a str>,
+}
+
+fn resolve_paths<'a>(
+    nodes: &'a [TreeNode],
     root: &Path,
-) -> Result<Vec<(PathBuf, EntryKind, String, usize, Option<String>)>, AppError> {
+) -> Result<Vec<ResolvedEntry<'a>>, AppError> {
     let mut stack: Vec<(usize, PathBuf)> = vec![(0, root.to_path_buf())];
     let mut paths = Vec::with_capacity(nodes.len());
 
@@ -177,13 +191,13 @@ fn resolve_paths(
             stack.push((node.depth, full_path.clone()));
         }
 
-        paths.push((
-            full_path,
-            node.kind.clone(),
-            node.name.clone(),
+        paths.push(ResolvedEntry {
+            path: full_path,
+            kind: node.kind.clone(),
+            name: &node.name,
             indent_level,
-            node.comment.clone(),
-        ));
+            comment: node.comment.as_deref(),
+        });
     }
     Ok(paths)
 }
@@ -192,7 +206,7 @@ fn create_directory(
     path: &Path,
     opts: &BuildOptions,
     stats: &mut BuildStats,
-    comment: Option<String>,
+    comment: Option<&str>,
 ) -> Result<(), AppError> {
     if opts.dry_run {
         println!("  [dry-run] 📁 {}", path.display());
@@ -200,13 +214,14 @@ fn create_directory(
         return Ok(());
     }
 
-    // If path already exists we only write a comment to it if specified so
+    // An existing directory is not an error and is not counted, but it may
+    // still receive a comment below.
     if !path.is_dir() {
         fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
         stats.dirs_created += 1;
     }
     if opts.dir_comments {
-        if let Some(comment_str) = comment.as_deref().filter(|s| !s.is_empty()) {
+        if let Some(comment_str) = comment.filter(|s| !s.is_empty()) {
             let comment_path = &path.join("COMMENT.md");
             if !comment_path.exists() {
                 fs::write(comment_path, comment_str).map_err(|e| AppError::io(comment_path, e))?;
@@ -221,7 +236,7 @@ fn create_file(
     path: &Path,
     opts: &BuildOptions,
     stats: &mut BuildStats,
-    comment: Option<String>,
+    comment: Option<&str>,
 ) -> Result<(), AppError> {
     if opts.dry_run {
         println!("  [dry-run] 📄 {}", path.display());
@@ -246,7 +261,6 @@ fn create_file(
     }
 
     let to_write = comment
-        .as_deref()
         .filter(|_| opts.file_comments)
         .filter(|s| !s.is_empty() && is_commentable(path))
         .map(|s| format_comment(path, s.to_string()))
@@ -256,7 +270,6 @@ fn create_file(
     Ok(())
 }
 
-/// Render a post-execution summary to stdout.
 /// Render a post-execution summary to stdout.
 pub fn print_summary(
     nodes: &[TreeNode],
@@ -299,15 +312,21 @@ pub fn print_summary(
 
 fn print_tree(nodes: &[TreeNode], root: &Path, _depth: usize, indent: &str) {
     if let Ok(resolved) = resolve_paths(nodes, root) {
-        for (_full_path, kind, name, indent_level, comment) in resolved {
-            let display_indent = "  ".repeat(indent_level);
-            let connector = if kind == EntryKind::Dir {
+        for entry in resolved {
+            let display_indent = "  ".repeat(entry.indent_level);
+            let connector = if entry.kind == EntryKind::Dir {
                 "├── 📁"
             } else {
                 "├── 📄"
             };
-            let comment_str = comment.map(|s| format!("\t# {s}")).unwrap_or_default();
-            println!("{indent}{display_indent}{connector} {name}{comment_str}");
+            let comment_str = entry
+                .comment
+                .map(|s| format!("\t# {s}"))
+                .unwrap_or_default();
+            println!(
+                "{indent}{display_indent}{connector} {}{comment_str}",
+                entry.name
+            );
         }
     }
 }
