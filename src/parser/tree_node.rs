@@ -34,7 +34,12 @@ pub struct TreeNode {
 
 impl TreeNode {
     /// Construct a new [`TreeNode`].
-    pub fn new(depth: usize, name: impl Into<String>, kind: EntryKind, comment: Option<String>) -> Self {
+    pub fn new(
+        depth: usize,
+        name: impl Into<String>,
+        kind: EntryKind,
+        comment: Option<String>,
+    ) -> Self {
         Self {
             depth,
             name: name.into(),

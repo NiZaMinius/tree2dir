@@ -264,7 +264,10 @@ root/
         .assert()
         .success();
 
-    assert_eq!(read(output.path().join("root/my file.txt")), "// spaced name");
+    assert_eq!(
+        read(output.path().join("root/my file.txt")),
+        "// spaced name"
+    );
     assert_eq!(
         read(output.path().join("root/other file.md")),
         "<!-- single quoted -->"
@@ -337,7 +340,16 @@ fn summary_tree_shows_comments() {
         .success();
 
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
-    assert!(stdout.contains("main.rs\t# entry point"), "stdout was:\n{stdout}");
-    assert!(stdout.contains("src\t# source code"), "stdout was:\n{stdout}");
-    assert!(stdout.contains("project\t# the project"), "stdout was:\n{stdout}");
+    assert!(
+        stdout.contains("main.rs\t# entry point"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("src\t# source code"),
+        "stdout was:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("project\t# the project"),
+        "stdout was:\n{stdout}"
+    );
 }

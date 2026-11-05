@@ -171,7 +171,10 @@ fn comment_after_file_is_captured() {
 fn comment_after_dir_with_trailing_slash_is_captured() {
     let nodes = parse_tree("src/ # source code");
     assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0].name, "src", "trailing slash must still be stripped");
+    assert_eq!(
+        nodes[0].name, "src",
+        "trailing slash must still be stripped"
+    );
     assert_eq!(nodes[0].kind, EntryKind::Dir);
     assert_eq!(nodes[0].comment, some("source code"));
 }
@@ -483,4 +486,3 @@ fn tree_node_new_stores_comment() {
     let without = TreeNode::new(0, "src", EntryKind::Dir, None);
     assert_eq!(without.comment, None);
 }
-

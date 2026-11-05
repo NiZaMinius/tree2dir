@@ -137,7 +137,11 @@ pub fn parse_dir_and_comment(line: &str) -> (String, Option<String>) {
 
             let comment = if remainder.starts_with('#') {
                 let c = remainder[1..].trim();
-                if c.is_empty() { None } else { Some(c.to_string()) }
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c.to_string())
+                }
             } else {
                 None
             };
@@ -149,7 +153,11 @@ pub fn parse_dir_and_comment(line: &str) -> (String, Option<String>) {
     if let Some((dir, comment)) = line.split_once(" #") {
         let dir = dir.trim().to_string();
         let comment = comment.trim();
-        let comment = if comment.is_empty() { None } else { Some(comment.to_string()) };
+        let comment = if comment.is_empty() {
+            None
+        } else {
+            Some(comment.to_string())
+        };
         (dir, comment)
     } else {
         (line.to_string(), None)

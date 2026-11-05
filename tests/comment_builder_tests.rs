@@ -103,7 +103,10 @@ fn file_comment_has_no_trailing_newline_and_no_extra_content() {
     let nodes = parse_tree("main.rs # entry point");
     build(&nodes, &opts(out.path(), true, false)).unwrap();
 
-    assert_eq!(fs::read(out.path().join("main.rs")).unwrap(), b"// entry point");
+    assert_eq!(
+        fs::read(out.path().join("main.rs")).unwrap(),
+        b"// entry point"
+    );
 }
 
 #[test]
@@ -138,7 +141,10 @@ fn restricted_extensions_are_created_empty() {
         "data.sqlite",
         "SHOUTING.ZIP", // case-insensitive
     ];
-    let tree: String = names.iter().map(|n| format!("{n} # should not be written\n")).collect();
+    let tree: String = names
+        .iter()
+        .map(|n| format!("{n} # should not be written\n"))
+        .collect();
     let nodes = parse_tree(&tree);
 
     let stats = build(&nodes, &opts(out.path(), true, false)).unwrap();
@@ -301,7 +307,11 @@ fn existing_file_is_not_touched_without_force_even_with_comment() {
     let target = out.path().join("main.rs");
     fs::write(&target, "original").unwrap();
 
-    let stats = build(&parse_tree("main.rs # entry"), &opts(out.path(), true, false)).unwrap();
+    let stats = build(
+        &parse_tree("main.rs # entry"),
+        &opts(out.path(), true, false),
+    )
+    .unwrap();
 
     assert_eq!(read(&target), "original");
     assert_eq!(stats.files_skipped, 1);
