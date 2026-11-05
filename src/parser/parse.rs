@@ -106,7 +106,7 @@ pub fn parse_tree(input: &str) -> Vec<TreeNode> {
         .map(|(i, entry)| {
             let next_depth = entries.get(i + 1).map(|next| next.depth);
             let (clean_name, kind) = classify_entry(&entry.name, entry.depth, next_depth);
-            TreeNode::new(entry.depth, clean_name, kind, entry.comment.clone())
+            TreeNode::new(entry.depth, clean_name, kind).with_comment(entry.comment.clone())
         })
         .collect()
 }

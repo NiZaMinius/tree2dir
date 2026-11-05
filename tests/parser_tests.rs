@@ -476,15 +476,19 @@ fn crlf_line_endings_do_not_leak_into_comments() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn tree_node_new_stores_comment() {
-    let with = TreeNode::new(2, "a.txt", EntryKind::File, some("hi"));
+fn tree_node_with_comment_stores_comment() {
+    let with = TreeNode::new(2, "a.txt", EntryKind::File).with_comment(some("hi"));
     assert_eq!(with.depth, 2);
     assert_eq!(with.name, "a.txt");
     assert_eq!(with.kind, EntryKind::File);
     assert_eq!(with.comment, some("hi"));
 
-    let without = TreeNode::new(0, "src", EntryKind::Dir, None);
+    let without = TreeNode::new(0, "src", EntryKind::Dir);
     assert_eq!(without.comment, None);
+
+    // `new` takes three arguments; the comment is opt-in.
+    let cleared = with.with_comment(None);
+    assert_eq!(cleared.comment, None);
 }
 
 // ---------------------------------------------------------------------------

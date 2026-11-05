@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::comments::CommentMode;
+
 /// tree2dir — convert ASCII / Unicode directory trees into real file structures.
 ///
 /// Paste or pipe a `tree`-style listing and let tree2dir recreate the
@@ -67,4 +69,14 @@ pub struct Cli {
     /// Save comments after dir and file names
     #[arg(long = "with-comments")]
     pub with_comments: bool,
+}
+
+impl Cli {
+    /// Resolve the comment-related flags into a single [`CommentMode`].
+    pub fn comment_mode(&self) -> CommentMode {
+        CommentMode::from_switches(
+            self.file_comments || self.with_comments,
+            self.dir_comments || self.with_comments,
+        )
+    }
 }

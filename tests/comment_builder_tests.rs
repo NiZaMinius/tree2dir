@@ -6,16 +6,17 @@
 //!
 //! Behaviour under test:
 //!
-//! - `file_comments`: the comment is written *into* the file, formatted with
+//! - `CommentMode::Files`: the comment is written *into* the file, formatted with
 //!   the comment syntax of its extension. Binary / extension-less files stay
 //!   empty.
-//! - `dir_comments`: the comment is written, unformatted, to `COMMENT.md`
+//! - `CommentMode::Dirs`: the comment is written, unformatted, to `COMMENT.md`
 //!   inside the new directory.
 
 use std::fs;
 use std::path::Path;
 
 use tempfile::TempDir;
+use tree2dir::comments::CommentMode;
 use tree2dir::fs_builder::{build, BuildOptions, BuildStats};
 use tree2dir::parser::parse_tree;
 
@@ -26,10 +27,8 @@ use tree2dir::parser::parse_tree;
 fn opts(root: &Path, file_comments: bool, dir_comments: bool) -> BuildOptions {
     BuildOptions {
         output_root: root.to_path_buf(),
-        dry_run: false,
-        force: false,
-        file_comments,
-        dir_comments,
+        comments: CommentMode::from_switches(file_comments, dir_comments),
+        ..Default::default()
     }
 }
 

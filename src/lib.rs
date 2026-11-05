@@ -5,6 +5,7 @@
 //! and [`parser::EntryKind`] without going through `main.rs`.
 
 pub mod cli;
+pub mod comments;
 pub mod error;
 pub mod fs_builder;
 pub mod parser;
@@ -51,8 +52,7 @@ pub fn run() -> anyhow::Result<()> {
         output_root: cli.output.clone(),
         dry_run: cli.dry_run,
         force: cli.force,
-        file_comments: cli.file_comments || cli.with_comments,
-        dir_comments: cli.dir_comments || cli.with_comments,
+        comments: cli.comment_mode(),
     };
 
     if cli.dry_run {

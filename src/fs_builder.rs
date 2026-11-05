@@ -16,6 +16,7 @@ use std::{
 };
 
 use crate::{
+    comments::{format_comment, is_commentable, CommentMode},
     error::AppError,
     parser::tree_node::{EntryKind, TreeNode},
 };
@@ -40,12 +41,23 @@ pub struct BuildOptions {
     pub dry_run: bool,
     /// When `true`, overwrite existing files rather than skipping them.
     pub force: bool,
-    /// When `true`, write file description as a comment
-    /// (e.g. '-main.rs # Comment 1' will convert to '// Comment 1' in main.rs).
-    pub file_comments: bool,
-    /// When `true`, write dir description in COMMENT.md in that dir
-    /// (e.g. '-src/ # Comment 1' will convert to '# Comment 1' in src/README.md).
-    pub dir_comments: bool,
+    /// Which inline comments are written to disk (none by default).
+    pub comments: CommentMode,
+}
+
+impl Default for BuildOptions {
+    /// Build into the current directory for real, skipping existing files,
+    /// without writing comments.  Struct-update syntax
+    /// (`BuildOptions { force: true, ..Default::default() }`) keeps callers
+    /// compiling when options are added.
+    fn default() -> Self {
+        Self {
+            output_root: PathBuf::from("."),
+            dry_run: false,
+            force: false,
+            comments: CommentMode::None,
+        }
+    }
 }
 
 /// Build a filesystem structure from a flat list of [`TreeNode`] values.
@@ -83,55 +95,6 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-fn is_commentable<P: AsRef<Path>>(path: P) -> bool {
-    // List of extensions that don't support arbitrary text or comments
-    const RESTRICTED_EXTENSIONS: &[&str] = &[
-        // Archives and compressed
-        "zip", "tar", "gz", "tgz", "7z", "rar", "bz2", // Executables and binaries
-        "exe", "dll", "so", "bin", "o", "obj", // Bytecode
-        "class", "pyc", "wasm", // Media containers (raw payloads)
-        "png", "jpg", "jpeg", "mp3", "mp4", "mkv", // Databases
-        "sqlite",
-    ];
-
-    path.as_ref()
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext_str| {
-            let lower = ext_str.to_lowercase();
-            !RESTRICTED_EXTENSIONS.contains(&lower.as_str())
-        })
-        .unwrap_or(false)
-}
-
-fn format_comment<P: AsRef<Path>>(path: P, comment: String) -> String {
-    let ext = path
-        .as_ref()
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    match ext.as_str() {
-        // Markup and documentation formats -> <!-- comment -->
-        "html" | "xml" | "svg" | "md" => format!("<!-- {comment} -->"),
-
-        // Scripting, config, and shell formats -> # comment
-        "py" | "sh" | "bash" | "rb" | "yml" | "yaml" | "toml" | "ini" => format!("# {comment}"),
-
-        // SQL, Lua, Haskell -> -- comment
-        "sql" | "lua" | "hs" => format!("-- {comment}"),
-
-        // C-style languages (Rust, JS, TS, C++, Java, Go, etc.) -> // comment
-        "rs" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "java" | "go" | "cs" | "php" => {
-            format!("// {comment}")
-        }
-
-        // Default fallback for unknown types
-        _ => format!("// {comment}"),
-    }
-}
 
 fn ensure_within_root(full_path: &Path, root: &Path) -> Result<(), AppError> {
     let root_c: Vec<_> = root.components().collect();
@@ -220,7 +183,7 @@ fn create_directory(
         fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
         stats.dirs_created += 1;
     }
-    if opts.dir_comments {
+    if opts.comments.dirs() {
         if let Some(comment_str) = comment.filter(|s| !s.is_empty()) {
             let comment_path = &path.join("COMMENT.md");
             if !comment_path.exists() {
@@ -261,7 +224,7 @@ fn create_file(
     }
 
     let to_write = comment
-        .filter(|_| opts.file_comments)
+        .filter(|_| opts.comments.files())
         .filter(|s| !s.is_empty() && is_commentable(path))
         .map(|s| format_comment(path, s.to_string()))
         .unwrap_or_default();
