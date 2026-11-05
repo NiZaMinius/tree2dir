@@ -18,6 +18,18 @@
 //! 2. The immediately following non-blank, non-comment line has a strictly
 //!    greater depth → **Directory**.
 //! 3. Otherwise → **File**.
+//!
+//! # Comments
+//!
+//! - A line whose content starts with `#` (after the indentation and any
+//!   tree-drawing glyphs) is a comment line and produces no entry.  To create
+//!   an entry whose name starts with `#`, quote it: `"#recycle"`.
+//! - Inside an unquoted entry, a `#` that follows whitespace (space or tab)
+//!   starts an inline comment.  A `#` glued to the name (`notes#1.txt`,
+//!   `C#/`) is part of the name.
+//! - A name wrapped in `"…"` or `'…'` may contain spaces and `#`.  The
+//!   closing quote must be followed by nothing, a `/`, or a `#` comment;
+//!   otherwise the quote belongs to an ordinary name (`'tis.txt`).
 
 use crate::parser::tree_node::{EntryKind, TreeNode};
 
@@ -50,50 +62,53 @@ pub fn split_prefix(line: &str) -> Option<(usize, &str)> {
     Some((prefix.chars().count(), name))
 }
 
+/// One surviving input line before directory/file classification.
+struct RawEntry {
+    depth: usize,
+    /// Name as written, including a trailing `/` when present.
+    name: String,
+    comment: Option<String>,
+}
+
 /// Parse an ASCII / Unicode directory tree string into a flat list of
 /// [`TreeNode`] values.
 ///
-/// Each returned node carries its indentation depth and kind, but nodes are
-/// **not** yet converted into full filesystem paths — that translation is the
-/// responsibility of [`crate::fs_builder`].
+/// Each returned node carries its indentation depth, kind and optional inline
+/// comment, but nodes are **not** yet converted into full filesystem paths —
+/// that translation is the responsibility of [`crate::fs_builder`].
 ///
-/// Lines that are blank or begin with `#` (after trimming) are silently
-/// skipped.
-///
-/// If user wants to preserve comments (for files, directories, or both), then
-/// lines that contain directory/file name AND '#' are splitted in two parts:
-/// name and comment. Comment is either written to a file as a comment (if
-/// possible; e.g. you can't add comments to .zip) or as a COMMENT.md to a directory.
+/// Blank lines, lines made only of indentation glyphs, and comment lines
+/// (content starting with `#`, see the module docs) are skipped.
 pub fn parse_tree(input: &str) -> Vec<TreeNode> {
-    // Collect only the lines we will actually process, retaining their
-    // original text so the lookahead can inspect the *next* line's depth.
-    let meaningful: Vec<&str> = input
+    // Split every line once up front: the directory heuristic needs the depth
+    // of the next *surviving* line, and skipped lines must not influence it.
+    let entries: Vec<RawEntry> = input
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            // Reject lines that are entirely empty, comments, or purely decoration
-            !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && !trimmed.chars().all(|c| INDENT_CHARS.contains(&c))
+        .filter_map(|line| {
+            let (depth, text) = split_prefix(line)?;
+            // Also catches comment lines hidden behind glyphs (`│   # note`),
+            // which a whole-line check on the raw text would miss.
+            if text.starts_with('#') {
+                return None;
+            }
+            let (name, comment) = parse_dir_and_comment(text);
+            (!name.is_empty()).then_some(RawEntry {
+                depth,
+                name,
+                comment,
+            })
         })
         .collect();
 
-    let mut nodes: Vec<TreeNode> = Vec::with_capacity(meaningful.len());
-
-    for (i, &line) in meaningful.iter().enumerate() {
-        let Some((depth, raw_name)) = split_prefix(line) else {
-            continue;
-        };
-
-        let (dir_name, comment) = parse_dir_and_comment(raw_name);
-
-        // Determine whether this entry is a directory or a file.
-        let (clean_name, kind) = classify_entry(&dir_name, i, &meaningful, depth);
-
-        nodes.push(TreeNode::new(depth, clean_name, kind, comment));
-    }
-
-    nodes
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let next_depth = entries.get(i + 1).map(|next| next.depth);
+            let (clean_name, kind) = classify_entry(&entry.name, entry.depth, next_depth);
+            TreeNode::new(entry.depth, clean_name, kind, entry.comment.clone())
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -102,66 +117,84 @@ pub fn parse_tree(input: &str) -> Vec<TreeNode> {
 
 /// Apply the three-rule heuristic to determine the [`EntryKind`] of a raw
 /// entry name.  Returns `(cleaned_name, kind)`.
-fn classify_entry<'a>(
-    raw_name: &'a str,
-    index: usize,
-    lines: &[&str],
+fn classify_entry(
+    raw_name: &str,
     current_depth: usize,
-) -> (&'a str, EntryKind) {
+    next_depth: Option<usize>,
+) -> (&str, EntryKind) {
     // Rule 1 — explicit trailing slash.
     if raw_name.ends_with('/') {
         return (raw_name.trim_end_matches('/'), EntryKind::Dir);
     }
 
-    // Rule 2 — lookahead: the next line sits one level deeper.
-    if let Some(&next_line) = lines.get(index + 1) {
-        if let Some((next_depth, _)) = split_prefix(next_line) {
-            if next_depth > current_depth {
-                return (raw_name, EntryKind::Dir);
-            }
-        }
+    // Rule 2 — lookahead: the next line sits deeper.
+    if next_depth.is_some_and(|next| next > current_depth) {
+        return (raw_name, EntryKind::Dir);
     }
 
     // Rule 3 — default: treat as a regular file.
     (raw_name, EntryKind::File)
 }
 
+/// Split the text of one entry line into its name and its inline comment.
+///
+/// `line` is the text after the indentation prefix.  Quoting rules are in the
+/// module docs.  A `/` that follows a closing quote stays on the returned
+/// name (`"my dir"/` → `my dir/`) so the caller can still recognise a
+/// directory.  An empty comment (`name #`) is returned as `None`.
 pub fn parse_dir_and_comment(line: &str) -> (String, Option<String>) {
-    // Handle quoted paths (in case directory names contain spaces)
-    if line.starts_with('"') || line.starts_with('\'') {
-        let quote_char = line.chars().next().unwrap();
-        if let Some(end_quote_idx) = line[1..].find(quote_char) {
-            let actual_end = end_quote_idx + 1;
-            let dir = line[1..actual_end].to_string();
-            let remainder = line[actual_end + 1..].trim();
+    parse_quoted(line).unwrap_or_else(|| split_unquoted(line))
+}
 
-            let comment = if remainder.starts_with('#') {
-                let c = remainder[1..].trim();
-                if c.is_empty() {
-                    None
-                } else {
-                    Some(c.to_string())
-                }
-            } else {
-                None
-            };
-            return (dir, comment);
-        }
+/// Parse `"name"` / `'name'` followed by an optional `/` and `# comment`.
+///
+/// Returns `None` when `line` is not a well-formed quoted entry, in which
+/// case the caller treats the whole text as an ordinary name.
+fn parse_quoted(line: &str) -> Option<(String, Option<String>)> {
+    let quote = line.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let after_open = &line[quote.len_utf8()..];
+    let close = after_open.find(quote)?;
+
+    let name = &after_open[..close];
+    if name.is_empty() {
+        return None;
     }
 
-    // Unquoted paths (find ' #' - preceded by whitespace)
-    if let Some((dir, comment)) = line.split_once(" #") {
-        let dir = dir.trim().to_string();
-        let comment = comment.trim();
-        let comment = if comment.is_empty() {
-            None
-        } else {
-            Some(comment.to_string())
-        };
-        (dir, comment)
+    let rest = &after_open[close + quote.len_utf8()..];
+    let (slash, rest) = match rest.strip_prefix('/') {
+        Some(after_slash) => ("/", after_slash),
+        None => ("", rest),
+    };
+
+    // Anything other than a comment after the closing quote means the quote
+    // was part of a plain name such as `'tis it's.txt`; refusing here avoids
+    // silently dropping the tail.
+    let rest = rest.trim();
+    let comment = if rest.is_empty() {
+        None
     } else {
-        (line.to_string(), None)
+        non_empty(rest.strip_prefix('#')?)
+    };
+
+    Some((format!("{name}{slash}"), comment))
+}
+
+/// Split an unquoted entry at the first `#` that follows whitespace.
+fn split_unquoted(text: &str) -> (String, Option<String>) {
+    let mut after_whitespace = false;
+    for (idx, ch) in text.char_indices() {
+        if ch == '#' && after_whitespace {
+            return (text[..idx].trim().to_string(), non_empty(&text[idx + 1..]));
+        }
+        after_whitespace = ch.is_whitespace();
     }
+    (text.to_string(), None)
+}
+
+/// Trim `text` and return it, or `None` when nothing is left.
+fn non_empty(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -194,10 +227,16 @@ mod tests {
 
     #[test]
     fn classify_trailing_slash_is_dir() {
-        let lines = &["src/"];
-        let (name, kind) = classify_entry("src/", 0, lines, 0);
+        let (name, kind) = classify_entry("src/", 0, None);
         assert_eq!(name, "src");
         assert_eq!(kind, EntryKind::Dir);
+    }
+
+    #[test]
+    fn classify_deeper_next_line_is_dir() {
+        assert_eq!(classify_entry("src", 0, Some(4)).1, EntryKind::Dir);
+        assert_eq!(classify_entry("src", 4, Some(4)).1, EntryKind::File);
+        assert_eq!(classify_entry("src", 4, Some(0)).1, EntryKind::File);
     }
 
     #[test]

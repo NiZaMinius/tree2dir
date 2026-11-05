@@ -486,3 +486,167 @@ fn tree_node_new_stores_comment() {
     let without = TreeNode::new(0, "src", EntryKind::Dir, None);
     assert_eq!(without.comment, None);
 }
+
+// ---------------------------------------------------------------------------
+// Whitespace before `#`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tab_before_hash_starts_a_comment() {
+    let nodes = parse_tree("main.rs\t# entry point");
+    assert_eq!(nodes[0].name, "main.rs");
+    assert_eq!(nodes[0].comment, some("entry point"));
+}
+
+#[test]
+fn mixed_whitespace_before_hash_starts_a_comment() {
+    let nodes = parse_tree("a.txt \t # c");
+    assert_eq!(nodes[0].name, "a.txt");
+    assert_eq!(nodes[0].comment, some("c"));
+}
+
+#[test]
+fn hash_after_a_non_space_character_never_starts_a_comment() {
+    for name in ["notes#1.txt", "C#/", "a#b#c", "dir#/"] {
+        let nodes = parse_tree(name);
+        assert_eq!(nodes[0].name, name.trim_end_matches('/'), "{name}");
+        assert_eq!(nodes[0].comment, None, "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Comment-only lines, including ones behind tree-drawing glyphs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn comment_line_behind_pipe_glyph_is_not_an_entry() {
+    let nodes = parse_tree("root/\n│   # helpers\n├── a.txt");
+    let names: Vec<_> = nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["root", "a.txt"]);
+}
+
+#[test]
+fn comment_line_behind_branch_glyph_is_not_an_entry() {
+    let nodes = parse_tree("root/\n├── # note\n└── a.txt");
+    let names: Vec<_> = nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["root", "a.txt"]);
+}
+
+#[test]
+fn comment_line_without_a_space_after_hash_is_still_a_comment() {
+    // Same rule as an unindented `#note` line, which has always been skipped.
+    let nodes = parse_tree("root/\n├── #note\n└── a.txt");
+    assert_eq!(nodes.len(), 2);
+}
+
+#[test]
+fn comment_line_between_parent_and_child_does_not_hide_the_child() {
+    // `src` has no slash; it is a directory only because the next *entry* is
+    // deeper, and the comment line in between must not break that lookahead.
+    let nodes = parse_tree("src\n    # about main\n    main.rs");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0].kind, EntryKind::Dir);
+    assert_eq!(nodes[1].kind, EntryKind::File);
+}
+
+#[test]
+fn quoting_creates_an_entry_whose_name_starts_with_hash() {
+    let nodes = parse_tree("\"#recycle\"/ # synology");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].name, "#recycle");
+    assert_eq!(nodes[0].kind, EntryKind::Dir);
+    assert_eq!(nodes[0].comment, some("synology"));
+}
+
+// ---------------------------------------------------------------------------
+// Quote characters that are not a quoted name
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unmatched_leading_quote_is_part_of_the_name() {
+    let nodes = parse_tree("'tis.txt");
+    assert_eq!(nodes[0].name, "'tis.txt");
+    assert_eq!(nodes[0].comment, None);
+}
+
+#[test]
+fn leading_quote_with_a_later_quote_does_not_swallow_the_tail() {
+    // Previously parsed as the name `tis it`, silently dropping `s.txt`.
+    let nodes = parse_tree("'tis it's.txt");
+    assert_eq!(nodes[0].name, "'tis it's.txt");
+    assert_eq!(nodes[0].comment, None);
+}
+
+#[test]
+fn text_glued_after_a_closing_quote_makes_the_whole_line_a_plain_name() {
+    let nodes = parse_tree("\"a\"b.txt");
+    assert_eq!(nodes[0].name, "\"a\"b.txt");
+}
+
+#[test]
+fn quote_inside_an_unquoted_name_is_literal() {
+    let nodes = parse_tree("it's.txt # fine");
+    assert_eq!(nodes[0].name, "it's.txt");
+    assert_eq!(nodes[0].comment, some("fine"));
+}
+
+#[test]
+fn other_quote_kind_inside_quotes_is_literal() {
+    let nodes = parse_tree("\"it's here.txt\" # c");
+    assert_eq!(nodes[0].name, "it's here.txt");
+    assert_eq!(nodes[0].comment, some("c"));
+}
+
+#[test]
+fn empty_quotes_are_not_a_quoted_name() {
+    // An empty name would resolve to the parent directory itself.
+    let nodes = parse_tree("\"\" # c");
+    assert_eq!(nodes[0].name, "\"\"");
+    assert_eq!(nodes[0].comment, some("c"));
+}
+
+// ---------------------------------------------------------------------------
+// Trailing slash after the closing quote
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slash_after_closing_quote_marks_a_directory() {
+    let nodes = parse_tree("\"my dir\"/ # c");
+    assert_eq!(nodes[0].name, "my dir");
+    assert_eq!(nodes[0].kind, EntryKind::Dir);
+    assert_eq!(nodes[0].comment, some("c"));
+}
+
+#[test]
+fn slash_after_closing_quote_without_comment() {
+    let nodes = parse_tree("'my dir'/");
+    assert_eq!(nodes[0].name, "my dir");
+    assert_eq!(nodes[0].kind, EntryKind::Dir);
+    assert_eq!(nodes[0].comment, None);
+}
+
+#[test]
+fn comment_may_follow_the_closing_quote_directly() {
+    let nodes = parse_tree("\"a b\"# c");
+    assert_eq!(nodes[0].name, "a b");
+    assert_eq!(nodes[0].comment, some("c"));
+}
+
+// ---------------------------------------------------------------------------
+// Comments never influence depth or classification
+// ---------------------------------------------------------------------------
+
+#[test]
+fn comments_and_comment_lines_leave_depth_and_kind_unchanged() {
+    let plain = parse_tree("root/\n├── src/\n│   └── main.rs\n└── README.md\n");
+    let noisy = parse_tree(
+        "root/ # r\n# banner\n├── src/ # s\n│   # why\n│   └── main.rs # m\n└── README.md\t# d\n",
+    );
+    let shape = |nodes: &[TreeNode]| {
+        nodes
+            .iter()
+            .map(|n| (n.depth, n.name.clone(), n.kind.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&plain), shape(&noisy));
+}
