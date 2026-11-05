@@ -52,6 +52,10 @@ Done in 2.5ms. Created 3 directories and 4 files.
   (path-traversal guard), skips existing files unless `--force` is passed,
   and supports `--dry-run` to preview without touching disk.
 - **Fast** — typical trees build in single-digit milliseconds.
+- **Inline comments** — `main.rs # entry point` just works: the comment never
+  ends up in the file name. Opt in with `--comments` to save it, in the
+  file's own comment syntax or in a `COMMENT.md` for directories
+  (see [Comments](#comments)).
 
 ## Install
 
@@ -97,6 +101,68 @@ tree2dir --file structure.txt --output ./my-project
 | `--force` | Overwrite files that already exist |
 | `-y, --yes` | Skip the confirmation prompt |
 | `--no-tui` | Never launch the TUI, even in an interactive terminal |
+| `--comments <MODE>` | Save inline `# comments`: `none` (default), `files`, `dirs` or `all` — see [Comments](#comments) |
+| `--with-file-comments` | Shorthand for `--comments files` |
+| `--with-dir-comments` | Shorthand for `--comments dirs` |
+| `--with-comments` | Shorthand for `--comments all` |
+
+`--comments` cannot be combined with the three shorthands.
+
+## Comments
+
+Add `# a note` after a name and tree2dir treats it as a comment, never as part
+of the name. By default comments are only shown in the summary and not saved;
+`--comments` chooses what is written to disk:
+
+| Mode | Writes |
+|---|---|
+| `none` (default) | nothing |
+| `files` | each file's comment, inside the file, in the comment syntax of its extension |
+| `dirs` | each directory's comment, in a `COMMENT.md` inside that directory |
+| `all` | both |
+
+```
+my-lib/ # a small library
+├── src/ # sources
+│   ├── lib.rs # public API
+│   └── util.py # helpers
+├── data.json # fixtures
+├── "release notes.md" # shown on the releases page
+└── README.md # docs
+```
+
+`tree2dir --file tree.txt --comments all` produces:
+
+| Path | Content |
+|---|---|
+| `my-lib/COMMENT.md` | `a small library` |
+| `my-lib/src/COMMENT.md` | `sources` |
+| `my-lib/src/lib.rs` | `// public API` |
+| `my-lib/src/util.py` | `# helpers` |
+| `my-lib/README.md` | `<!-- docs -->` |
+| `my-lib/release notes.md` | `<!-- shown on the releases page -->` |
+| `my-lib/data.json` | *(empty)* |
+
+Details worth knowing:
+
+- **Unknown file types stay empty.** A comment is written only for extensions
+  whose comment syntax is known (`rs`, `js`, `ts`, `py`, `sh`, `yml`, `toml`,
+  `sql`, `html`, `md`, and a few dozen more). Everything else — `json`,
+  `css`, `txt`, `env`, images, archives, files without an extension — is
+  created empty rather than risk corrupting it.
+- **One line per comment**, ending with a newline. Line breaks, control
+  characters and anything that would close a comment early (such as `-->`)
+  are neutralised, so a comment cannot inject code into the generated file.
+- **Nothing is overwritten without `--force`**: not an existing file, and not
+  an existing `COMMENT.md` (a warning explains what was skipped). If the tree
+  lists a `COMMENT.md` itself, that entry wins over the generated one.
+- **`--dry-run`** shows every comment it would write.
+- **Where `#` starts a comment.** After whitespace (space or tab):
+  `notes#1.txt` and `C#/` keep their `#`. A line that starts with `#` — even
+  behind tree glyphs, like `│   # helpers` — is a comment line and creates
+  nothing. To name an entry that starts with `#`, quote it: `"#recycle"/`.
+- **Names with spaces or `#`** can be quoted with `"…"` or `'…'`:
+  `"my dir"/ # notes`.
 
 ## TUI keybindings
 

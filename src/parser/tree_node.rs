@@ -28,15 +28,28 @@ pub struct TreeNode {
     pub name: String,
     /// Whether this node represents a directory or a file.
     pub kind: EntryKind,
+    /// Inline comment from the source line, without the `#` marker and
+    /// trimmed.  `None` when the line has no comment or the comment is empty.
+    pub comment: Option<String>,
 }
 
 impl TreeNode {
-    /// Construct a new [`TreeNode`].
+    /// Construct a new [`TreeNode`] without a comment.
+    ///
+    /// Attach one with [`TreeNode::with_comment`].
     pub fn new(depth: usize, name: impl Into<String>, kind: EntryKind) -> Self {
         Self {
             depth,
             name: name.into(),
             kind,
+            comment: None,
         }
+    }
+
+    /// Set the inline comment, replacing any previous one.
+    #[must_use]
+    pub fn with_comment(mut self, comment: Option<String>) -> Self {
+        self.comment = comment;
+        self
     }
 }

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+use crate::comments::CommentMode;
+
 /// tree2dir — convert ASCII / Unicode directory trees into real file structures.
 ///
 /// Paste or pipe a `tree`-style listing and let tree2dir recreate the
@@ -55,4 +57,48 @@ pub struct Cli {
     /// Forces plain-text execution mode.
     #[arg(long = "no-tui")]
     pub no_tui: bool,
+
+    /// Which inline `# comments` to save to disk.
+    ///
+    /// Comments after a name (`main.rs # entry point`) are always removed
+    /// from the name. By default they are discarded; this chooses what to
+    /// keep. Existing files and COMMENT.md files are never overwritten
+    /// without --force.
+    #[arg(
+        long = "comments",
+        value_name = "MODE",
+        value_enum,
+        conflicts_with_all = ["dir_comments", "file_comments", "with_comments"],
+    )]
+    pub comments: Option<CommentMode>,
+
+    /// Shorthand for `--comments dirs`: save directory comments to COMMENT.md
+    /// inside each directory.
+    #[arg(long = "with-dir-comments")]
+    pub dir_comments: bool,
+
+    /// Shorthand for `--comments files`: save file comments inside the files,
+    /// in the comment syntax of their extension (other files stay empty).
+    #[arg(long = "with-file-comments")]
+    pub file_comments: bool,
+
+    /// Shorthand for `--comments all`: save file and directory comments.
+    #[arg(long = "with-comments")]
+    pub with_comments: bool,
+}
+
+impl Cli {
+    /// Resolve the comment-related flags into a single [`CommentMode`].
+    ///
+    /// `--comments` and the `--with-*` shorthands cannot be combined (clap
+    /// rejects it), so at most one of the two sources is set.
+    pub fn comment_mode(&self) -> CommentMode {
+        if let Some(mode) = self.comments {
+            return mode;
+        }
+        CommentMode::from_switches(
+            self.file_comments || self.with_comments,
+            self.dir_comments || self.with_comments,
+        )
+    }
 }

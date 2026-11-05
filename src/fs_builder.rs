@@ -9,13 +9,24 @@
 //!   standard error, but the build process continues.
 //!
 //! When `--force` **is** set, existing files are overwritten unconditionally.
+//!
+//! # Directory comments
+//!
+//! A directory comment goes to `COMMENT.md` inside that directory, under the
+//! same rules as any other file: an existing `COMMENT.md` is left alone
+//! (with a warning) unless `--force` is set.  A `COMMENT.md` that the tree
+//! itself lists always wins over a generated one, so the two never fight
+//! over the same path.
 
 use std::{
+    collections::HashSet,
+    fmt::Display,
     fs,
     path::{Component, Path, PathBuf},
 };
 
 use crate::{
+    comments::{format_dir_comment, format_file_comment, sanitize, CommentMode, DIR_COMMENT_FILE},
     error::AppError,
     parser::tree_node::{EntryKind, TreeNode},
 };
@@ -29,6 +40,14 @@ pub struct BuildStats {
     pub files_created: usize,
     /// Number of files skipped due to conflicts (no `--force`).
     pub files_skipped: usize,
+    /// Number of comments written to disk (in a dry run: that would be).
+    ///
+    /// Comments are a side effect of their entry, so the files holding them
+    /// (`COMMENT.md`) are not part of [`BuildStats::files_created`].
+    pub comments_written: usize,
+    /// Number of directory comments left unwritten because their
+    /// `COMMENT.md` already exists (no `--force`) or is listed in the tree.
+    pub comments_skipped: usize,
 }
 
 /// Options that govern how the builder behaves.
@@ -40,6 +59,23 @@ pub struct BuildOptions {
     pub dry_run: bool,
     /// When `true`, overwrite existing files rather than skipping them.
     pub force: bool,
+    /// Which inline comments are written to disk (none by default).
+    pub comments: CommentMode,
+}
+
+impl Default for BuildOptions {
+    /// Build into the current directory for real, skipping existing files,
+    /// without writing comments.  Struct-update syntax
+    /// (`BuildOptions { force: true, ..Default::default() }`) keeps callers
+    /// compiling when options are added.
+    fn default() -> Self {
+        Self {
+            output_root: PathBuf::from("."),
+            dry_run: false,
+            force: false,
+            comments: CommentMode::None,
+        }
+    }
 }
 
 /// Build a filesystem structure from a flat list of [`TreeNode`] values.
@@ -64,10 +100,16 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     let mut stats = BuildStats::default();
     let resolved = resolve_paths(nodes, &opts.output_root)?;
 
-    for (full_path, kind, _name, _indent) in resolved {
-        match kind {
-            EntryKind::Dir => create_directory(&full_path, opts, &mut stats)?,
-            EntryKind::File => create_file(&full_path, opts, &mut stats)?,
+    // Everything the tree lists explicitly, files and directories alike: a
+    // generated COMMENT.md must not collide with any of it.  A listed
+    // directory named COMMENT.md would otherwise find a file in its place and
+    // abort the build.
+    let listed_paths: HashSet<&Path> = resolved.iter().map(|entry| entry.path.as_path()).collect();
+
+    for entry in &resolved {
+        match entry.kind {
+            EntryKind::Dir => create_directory(entry, opts, &listed_paths, &mut stats)?,
+            EntryKind::File => create_file(entry, opts, &mut stats)?,
         }
     }
 
@@ -87,10 +129,24 @@ fn ensure_within_root(full_path: &Path, root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn resolve_paths(
-    nodes: &[TreeNode],
+/// A [`TreeNode`] joined onto the output root, ready to be created or printed.
+///
+/// Borrows from the node list so resolving a large tree does not clone every
+/// name and comment.
+struct ResolvedEntry<'a> {
+    /// Absolute-or-relative path under the output root.
+    path: PathBuf,
+    kind: EntryKind,
+    name: &'a str,
+    /// Number of ancestor directories, used only to indent the printed tree.
+    indent_level: usize,
+    comment: Option<&'a str>,
+}
+
+fn resolve_paths<'a>(
+    nodes: &'a [TreeNode],
     root: &Path,
-) -> Result<Vec<(PathBuf, EntryKind, String, usize)>, AppError> {
+) -> Result<Vec<ResolvedEntry<'a>>, AppError> {
     let mut stack: Vec<(usize, PathBuf)> = vec![(0, root.to_path_buf())];
     let mut paths = Vec::with_capacity(nodes.len());
 
@@ -122,40 +178,141 @@ fn resolve_paths(
             stack.push((node.depth, full_path.clone()));
         }
 
-        paths.push((
-            full_path,
-            node.kind.clone(),
-            node.name.clone(),
+        paths.push(ResolvedEntry {
+            path: full_path,
+            kind: node.kind.clone(),
+            name: &node.name,
             indent_level,
-        ));
+            comment: node.comment.as_deref(),
+        });
     }
     Ok(paths)
 }
 
-fn create_directory(
-    path: &Path,
+/// Emit a non-fatal warning.  One place, so the output channel can change.
+fn warn(message: impl Display) {
+    eprintln!("  ⚠  warning: {message}");
+}
+
+/// What to do about a directory's comment.
+enum DirComment {
+    /// No comment, or directory comments are off.
+    Nothing,
+    Write {
+        target: PathBuf,
+        content: String,
+    },
+    /// The tree itself lists `target`; the listed entry wins.
+    ListedInTree {
+        target: PathBuf,
+    },
+}
+
+fn plan_dir_comment(
+    entry: &ResolvedEntry<'_>,
     opts: &BuildOptions,
+    listed_paths: &HashSet<&Path>,
+) -> DirComment {
+    let Some(content) = entry
+        .comment
+        .filter(|_| opts.comments.dirs())
+        .and_then(format_dir_comment)
+    else {
+        return DirComment::Nothing;
+    };
+
+    let target = entry.path.join(DIR_COMMENT_FILE);
+    if listed_paths.contains(target.as_path()) {
+        DirComment::ListedInTree { target }
+    } else {
+        DirComment::Write { target, content }
+    }
+}
+
+/// The content a file entry should be created with, if it gets a comment.
+fn file_comment_content(entry: &ResolvedEntry<'_>, opts: &BuildOptions) -> Option<String> {
+    entry
+        .comment
+        .filter(|_| opts.comments.files())
+        .and_then(|comment| format_file_comment(&entry.path, comment))
+}
+
+/// One-line rendering of comment content for the dry-run report.
+fn one_line(content: &str) -> String {
+    content.trim_end().replace('\n', " ⏎ ")
+}
+
+fn skip_listed_comment(target: &Path, stats: &mut BuildStats) {
+    warn(format!(
+        "{} is listed in the tree, so its directory's comment was not written",
+        target.display()
+    ));
+    stats.comments_skipped += 1;
+}
+
+fn create_directory(
+    entry: &ResolvedEntry<'_>,
+    opts: &BuildOptions,
+    listed_paths: &HashSet<&Path>,
     stats: &mut BuildStats,
 ) -> Result<(), AppError> {
+    let path = &entry.path;
+    let comment = plan_dir_comment(entry, opts, listed_paths);
+
     if opts.dry_run {
         println!("  [dry-run] 📁 {}", path.display());
         stats.dirs_created += 1;
+        match comment {
+            DirComment::Nothing => {}
+            DirComment::Write { content, .. } => {
+                println!("              ↳ {DIR_COMMENT_FILE}: {}", one_line(&content));
+                stats.comments_written += 1;
+            }
+            DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
+        }
         return Ok(());
     }
 
-    // Silently ignore directories that already exist.
-    if path.is_dir() {
-        return Ok(());
+    // An existing directory is not an error and is not counted, but it may
+    // still receive a comment below.
+    if !path.is_dir() {
+        fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
+        stats.dirs_created += 1;
     }
 
-    fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
-    stats.dirs_created += 1;
+    match comment {
+        DirComment::Nothing => {}
+        DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
+        DirComment::Write { target, content } => {
+            if target.exists() && !opts.force {
+                warn(format!(
+                    "{} already exists, directory comment skipped (use --force to overwrite)",
+                    target.display()
+                ));
+                stats.comments_skipped += 1;
+            } else {
+                fs::write(&target, content).map_err(|e| AppError::io(&target, e))?;
+                stats.comments_written += 1;
+            }
+        }
+    }
     Ok(())
 }
 
-fn create_file(path: &Path, opts: &BuildOptions, stats: &mut BuildStats) -> Result<(), AppError> {
+fn create_file(
+    entry: &ResolvedEntry<'_>,
+    opts: &BuildOptions,
+    stats: &mut BuildStats,
+) -> Result<(), AppError> {
+    let path = &entry.path;
+    let content = file_comment_content(entry, opts);
+
     if opts.dry_run {
         println!("  [dry-run] 📄 {}", path.display());
+        if let Some(content) = &content {
+            println!("              ↳ comment: {}", one_line(content));
+            stats.comments_written += 1;
+        }
         stats.files_created += 1;
         return Ok(());
     }
@@ -165,7 +322,7 @@ fn create_file(path: &Path, opts: &BuildOptions, stats: &mut BuildStats) -> Resu
             // Overwrite: fall through to write.
         } else {
             // Skip with a non-fatal warning.
-            eprintln!("  ⚠  warning: {}", AppError::FileExists(path.to_path_buf()));
+            warn(AppError::FileExists(path.to_path_buf()));
             stats.files_skipped += 1;
             return Ok(());
         }
@@ -176,12 +333,14 @@ fn create_file(path: &Path, opts: &BuildOptions, stats: &mut BuildStats) -> Resu
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    fs::write(path, b"").map_err(|e| AppError::io(path, e))?;
+    fs::write(path, content.as_deref().unwrap_or("")).map_err(|e| AppError::io(path, e))?;
     stats.files_created += 1;
+    if content.is_some() {
+        stats.comments_written += 1;
+    }
     Ok(())
 }
 
-/// Render a post-execution summary to stdout.
 /// Render a post-execution summary to stdout.
 pub fn print_summary(
     nodes: &[TreeNode],
@@ -213,6 +372,12 @@ pub fn print_summary(
         );
     }
 
+    if stats.comments_written > 0 {
+        let comments_str = pluralise(stats.comments_written, "comment", "comments");
+        let verb = if dry_run { "Would write" } else { "Wrote" };
+        println!("{verb} {} {comments_str}.", stats.comments_written);
+    }
+
     if stats.files_skipped > 0 {
         let skipped_str = pluralise(stats.files_skipped, "file", "files");
         eprintln!(
@@ -220,18 +385,41 @@ pub fn print_summary(
             stats.files_skipped
         );
     }
+
+    if stats.comments_skipped > 0 {
+        let skipped_str = pluralise(
+            stats.comments_skipped,
+            "directory comment",
+            "directory comments",
+        );
+        eprintln!(
+            "  ⚠  {} {skipped_str} not written (see the warnings above).",
+            stats.comments_skipped
+        );
+    }
 }
 
 fn print_tree(nodes: &[TreeNode], root: &Path, _depth: usize, indent: &str) {
     if let Ok(resolved) = resolve_paths(nodes, root) {
-        for (_full_path, kind, name, indent_level) in resolved {
-            let display_indent = "  ".repeat(indent_level);
-            let connector = if kind == EntryKind::Dir {
+        for entry in resolved {
+            let display_indent = "  ".repeat(entry.indent_level);
+            let connector = if entry.kind == EntryKind::Dir {
                 "├── 📁"
             } else {
                 "├── 📄"
             };
-            println!("{indent}{display_indent}{connector} {name}");
+            // Sanitised: comments come from pasted text and must not carry
+            // terminal escape sequences into the user's terminal.
+            let comment_str = entry
+                .comment
+                .map(sanitize)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("\t# {s}"))
+                .unwrap_or_default();
+            println!(
+                "{indent}{display_indent}{connector} {}{comment_str}",
+                entry.name
+            );
         }
     }
 }
