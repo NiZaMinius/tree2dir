@@ -97,7 +97,7 @@ tree2dir --file structure.txt --output ./my-project
 |---|---|
 | `-f, --file <PATH>` | Read the tree from a file instead of stdin/TUI |
 | `-o, --output <DIR>` | Target directory (default: current directory) |
-| `--dry-run` | Show what would be created, without touching disk |
+| `--dry-run` | Show what a real run would do, without touching disk: existing directories are not counted, existing files are reported as skipped (or overwritten with `--force`) |
 | `--force` | Overwrite files that already exist |
 | `-y, --yes` | Skip the confirmation prompt |
 | `--no-tui` | Never launch the TUI, even in an interactive terminal |
