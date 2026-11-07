@@ -19,7 +19,7 @@
 //! over the same path.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt::Display,
     fs, io,
     path::{Component, Path, PathBuf},
@@ -112,9 +112,10 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     let listed_paths: HashSet<&Path> = resolved.iter().map(|entry| entry.path.as_path()).collect();
 
     // A dry run writes nothing, so a path it "creates" is not on disk when a
-    // later entry names it again (duplicate lines).  Remember those paths so the
-    // report matches what the real run, which would find them, does.
-    let mut planned: HashSet<PathBuf> = HashSet::new();
+    // later entry names it again (duplicate lines).  Remember those paths and
+    // what each would be, so the report matches what the real run, which would
+    // find them, does.
+    let mut planned: HashMap<PathBuf, EntryKind> = HashMap::new();
 
     for entry in &resolved {
         match entry.kind {
@@ -249,6 +250,32 @@ fn file_comment_content(entry: &ResolvedEntry<'_>, opts: &BuildOptions) -> Optio
         .and_then(|comment| format_file_comment(&entry.path, comment))
 }
 
+/// The error a real run would hit when it tries to write a file at a path that
+/// is a directory.
+fn is_a_directory(path: &Path) -> AppError {
+    AppError::io(
+        path,
+        io::Error::new(io::ErrorKind::IsADirectory, "is a directory"),
+    )
+}
+
+/// The error a real run would hit when it tries to create a directory at a
+/// path that is a file.
+fn not_a_directory(path: &Path) -> AppError {
+    AppError::io(
+        path,
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "exists and is not a directory",
+        ),
+    )
+}
+
+/// Whether `path` is, or in a dry run would by now be, a directory.
+fn is_dir_or_planned(path: &Path, planned: &HashMap<PathBuf, EntryKind>) -> bool {
+    path.is_dir() || planned.get(path) == Some(&EntryKind::Dir)
+}
+
 /// One-line rendering of comment content for the dry-run report.
 fn one_line(content: &str) -> String {
     content.trim_end().replace('\n', " ⏎ ")
@@ -267,25 +294,19 @@ fn create_directory(
     opts: &BuildOptions,
     listed_paths: &HashSet<&Path>,
     stats: &mut BuildStats,
-    planned: &mut HashSet<PathBuf>,
+    planned: &mut HashMap<PathBuf, EntryKind>,
 ) -> Result<(), AppError> {
     let path = &entry.path;
     let comment = plan_dir_comment(entry, opts, listed_paths);
 
     if opts.dry_run {
         // Same decisions as the real run below, from read-only disk checks.
-        if path.exists() && !path.is_dir() {
-            // The real run's create_dir_all fails here; promising success
-            // would be a lie.
-            return Err(AppError::io(
-                path,
-                io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "exists and is not a directory",
-                ),
-            ));
+        // A file on disk, or one planned earlier in this pass, makes the real
+        // run's create_dir_all fail; promising success would be a lie.
+        if (path.exists() && !path.is_dir()) || planned.get(path) == Some(&EntryKind::File) {
+            return Err(not_a_directory(path));
         }
-        let exists = path.is_dir() || planned.contains(path);
+        let exists = is_dir_or_planned(path, planned);
         println!(
             "  [dry-run] 📁 {}{}",
             path.display(),
@@ -293,12 +314,17 @@ fn create_directory(
         );
         if !exists {
             stats.dirs_created += 1;
-            planned.insert(path.clone());
+            planned.insert(path.clone(), EntryKind::Dir);
         }
         match comment {
             DirComment::Nothing => {}
             DirComment::Write { target, content } => {
-                if (target.exists() || planned.contains(&target)) && !opts.force {
+                let exists = target.exists() || planned.contains_key(&target);
+                if exists && opts.force && is_dir_or_planned(&target, planned) {
+                    // fs::write cannot replace a directory.
+                    return Err(is_a_directory(&target));
+                }
+                if exists && !opts.force {
                     println!(
                         "              ↳ {DIR_COMMENT_FILE} exists — comment would be skipped"
                     );
@@ -306,7 +332,7 @@ fn create_directory(
                 } else {
                     println!("              ↳ {DIR_COMMENT_FILE}: {}", one_line(&content));
                     stats.comments_written += 1;
-                    planned.insert(target);
+                    planned.insert(target, EntryKind::File);
                 }
             }
             DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
@@ -344,13 +370,18 @@ fn create_file(
     entry: &ResolvedEntry<'_>,
     opts: &BuildOptions,
     stats: &mut BuildStats,
-    planned: &mut HashSet<PathBuf>,
+    planned: &mut HashMap<PathBuf, EntryKind>,
 ) -> Result<(), AppError> {
     let path = &entry.path;
     let content = file_comment_content(entry, opts);
 
     if opts.dry_run {
-        let exists = path.exists() || planned.contains(path);
+        let exists = path.exists() || planned.contains_key(path);
+        if exists && opts.force && is_dir_or_planned(path, planned) {
+            // The real run's fs::write fails on a directory; an "overwrite"
+            // would not happen.
+            return Err(is_a_directory(path));
+        }
         if exists && !opts.force {
             // The real run skips it, and writes no comment either.
             println!("  [dry-run] 📄 {} (exists — would skip)", path.display());
@@ -371,7 +402,7 @@ fn create_file(
             stats.comments_written += 1;
         }
         stats.files_created += 1;
-        planned.insert(path.clone());
+        planned.insert(path.clone(), EntryKind::File);
         return Ok(());
     }
 

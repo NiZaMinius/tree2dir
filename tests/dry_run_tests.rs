@@ -26,6 +26,9 @@ proj/ # the project
 /// Duplicate entries: the real run sees the first one on disk when it reaches the second.
 const DUPLICATES: &str = "a.txt\na.txt\nd/ # dir\nd/ # again\nd/x.rs # file\nd/x.rs # file\n";
 
+/// The same path listed as a file and as a directory, in both orders.
+const TYPE_CONFLICTS: &str = "f\nf/\nd/\nd\nok.txt\n";
+
 fn cmd() -> Command {
     Command::cargo_bin("tree2dir").expect("tree2dir binary not found — run `cargo build` first")
 }
@@ -53,6 +56,11 @@ fn setups() -> Vec<(&'static str, Setup)> {
         ("existing COMMENT.md", |r| {
             touch(r, "proj/COMMENT.md", "old");
             touch(r, "d/COMMENT.md", "old");
+        }),
+        ("directories where files are expected", |r| {
+            fs::create_dir_all(r.join("proj/data.json")).unwrap();
+            fs::create_dir_all(r.join("a.txt")).unwrap();
+            fs::create_dir_all(r.join("proj/COMMENT.md")).unwrap();
         }),
         ("everything exists", |r| {
             for rel in [
@@ -82,7 +90,7 @@ fn opts(root: &Path, dry_run: bool, force: bool, comments: CommentMode) -> Build
 }
 
 #[test]
-fn dry_run_and_real_run_report_identical_stats_in_every_state() {
+fn dry_run_and_real_run_agree_in_every_state() {
     let modes = [
         CommentMode::None,
         CommentMode::Files,
@@ -90,7 +98,7 @@ fn dry_run_and_real_run_report_identical_stats_in_every_state() {
         CommentMode::All,
     ];
     for (state, setup) in setups() {
-        for tree in [TREE, DUPLICATES] {
+        for tree in [TREE, DUPLICATES, TYPE_CONFLICTS] {
             for force in [false, true] {
                 for mode in modes {
                     let nodes = parse_tree(tree);
@@ -98,14 +106,22 @@ fn dry_run_and_real_run_report_identical_stats_in_every_state() {
                     setup(dry_dir.path());
                     setup(real_dir.path());
 
-                    let dry = build(&nodes, &opts(dry_dir.path(), true, force, mode)).unwrap();
-                    let real = build(&nodes, &opts(real_dir.path(), false, force, mode)).unwrap();
+                    let dry = build(&nodes, &opts(dry_dir.path(), true, force, mode));
+                    let real = build(&nodes, &opts(real_dir.path(), false, force, mode));
 
-                    assert_eq!(
-                        dry, real,
-                        "dry run disagrees with the real run: state={state:?} force={force} \
-                         mode={mode:?} tree={tree:?}"
-                    );
+                    let context =
+                        format!("state={state:?} force={force} mode={mode:?} tree={tree:?}");
+                    match (dry, real) {
+                        (Ok(dry), Ok(real)) => assert_eq!(dry, real, "stats differ: {context}"),
+                        // Both fail: the dry run told the truth about a build
+                        // that cannot succeed.
+                        (Err(_), Err(_)) => {}
+                        (dry, real) => panic!(
+                            "dry run and real run disagree on success: dry={:?} real={:?}; {context}",
+                            dry.map(|_| "ok"),
+                            real.map(|_| "ok")
+                        ),
+                    }
                 }
             }
         }
@@ -138,11 +154,13 @@ fn dry_run_never_changes_the_disk_even_when_files_exist() {
         };
         let before = snapshot(dir.path());
 
-        build(
+        // Success is not the point here: with --force some states make the dry run
+        // fail (a directory where a file is expected), and it must leave the disk
+        // untouched either way.
+        let _ = build(
             &parse_tree(TREE),
             &opts(dir.path(), true, true, CommentMode::All),
-        )
-        .unwrap();
+        );
 
         assert_eq!(before, snapshot(dir.path()), "state {state:?}");
     }
@@ -163,6 +181,114 @@ fn dry_run_on_a_directory_path_that_is_a_file_fails_like_the_real_run() {
         fs::read_to_string(dir.path().join("proj")).unwrap(),
         "i am a file"
     );
+}
+
+#[test]
+fn dry_run_rejects_a_path_listed_as_a_file_and_then_as_a_directory() {
+    let dir = TempDir::new().unwrap();
+    let nodes = parse_tree("x\nx/\n");
+
+    let real = build(&nodes, &opts(dir.path(), false, false, CommentMode::None));
+    let dry = build(
+        &nodes,
+        &opts(
+            TempDir::new().unwrap().path(),
+            true,
+            false,
+            CommentMode::None,
+        ),
+    );
+
+    assert!(
+        real.is_err(),
+        "the real run cannot make a directory over its own file"
+    );
+    assert!(dry.is_err(), "so the dry run must not report success");
+}
+
+#[test]
+fn dry_run_with_force_rejects_a_file_over_a_directory_that_exists() {
+    let (dry_dir, real_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    for d in [&dry_dir, &real_dir] {
+        fs::create_dir(d.path().join("a.txt")).unwrap();
+    }
+    let nodes = parse_tree("a.txt\n");
+
+    let real = build(
+        &nodes,
+        &opts(real_dir.path(), false, true, CommentMode::None),
+    );
+    let dry = build(&nodes, &opts(dry_dir.path(), true, true, CommentMode::None));
+
+    assert!(real.is_err(), "fs::write cannot overwrite a directory");
+    assert!(
+        dry.is_err(),
+        "so --force over a directory is not an overwrite"
+    );
+}
+
+#[test]
+fn dry_run_without_force_skips_a_file_whose_path_is_a_directory_like_the_real_run() {
+    let (dry_dir, real_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    for d in [&dry_dir, &real_dir] {
+        fs::create_dir(d.path().join("a.txt")).unwrap();
+    }
+    let nodes = parse_tree("a.txt\n");
+
+    let real = build(
+        &nodes,
+        &opts(real_dir.path(), false, false, CommentMode::None),
+    )
+    .unwrap();
+    let dry = build(
+        &nodes,
+        &opts(dry_dir.path(), true, false, CommentMode::None),
+    )
+    .unwrap();
+
+    assert_eq!(dry, real);
+    assert_eq!(dry.files_skipped, 1);
+}
+
+#[test]
+fn dry_run_with_force_rejects_a_file_listed_after_a_directory_of_the_same_name() {
+    let nodes = parse_tree("x/\nx\n");
+    let real = build(
+        &nodes,
+        &opts(
+            TempDir::new().unwrap().path(),
+            false,
+            true,
+            CommentMode::None,
+        ),
+    );
+    let dry = build(
+        &nodes,
+        &opts(
+            TempDir::new().unwrap().path(),
+            true,
+            true,
+            CommentMode::None,
+        ),
+    );
+    assert!(real.is_err() && dry.is_err());
+}
+
+#[test]
+fn dry_run_with_force_rejects_a_comment_file_that_would_replace_a_directory() {
+    let (dry_dir, real_dir) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    for d in [&dry_dir, &real_dir] {
+        fs::create_dir_all(d.path().join("proj/COMMENT.md")).unwrap();
+    }
+    let nodes = parse_tree("proj/ # about\n");
+
+    let real = build(
+        &nodes,
+        &opts(real_dir.path(), false, true, CommentMode::Dirs),
+    );
+    let dry = build(&nodes, &opts(dry_dir.path(), true, true, CommentMode::Dirs));
+
+    assert!(real.is_err() && dry.is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +418,22 @@ fn dry_run_reports_an_existing_comment_md_as_skipped() {
         stderr.contains("1 directory comment would not be written"),
         "{stderr}"
     );
+}
+
+#[test]
+fn dry_run_with_force_fails_clearly_when_a_file_would_replace_a_directory() {
+    let input = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let tree = write_tree(&input);
+    fs::create_dir_all(out.path().join("proj/data.json")).unwrap();
+
+    cmd()
+        .args(["--file", tree.to_str().unwrap()])
+        .args(["--output", out.path().to_str().unwrap()])
+        .args(["--dry-run", "--force"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("data.json"));
 }
 
 #[test]
