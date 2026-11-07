@@ -21,7 +21,7 @@
 use std::{
     collections::HashSet,
     fmt::Display,
-    fs,
+    fs, io,
     path::{Component, Path, PathBuf},
 };
 
@@ -56,6 +56,11 @@ pub struct BuildOptions {
     /// Root directory under which the entire structure is generated.
     pub output_root: PathBuf,
     /// When `true`, print the planned operations without writing to disk.
+    ///
+    /// The report follows what a real run would do given what already exists:
+    /// existing directories are not counted, existing files are reported as
+    /// skipped (or overwritten with `force`), and no comment is promised for a
+    /// file that would be skipped.
     pub dry_run: bool,
     /// When `true`, overwrite existing files rather than skipping them.
     pub force: bool,
@@ -106,10 +111,17 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     // abort the build.
     let listed_paths: HashSet<&Path> = resolved.iter().map(|entry| entry.path.as_path()).collect();
 
+    // A dry run writes nothing, so a path it "creates" is not on disk when a
+    // later entry names it again (duplicate lines).  Remember those paths so the
+    // report matches what the real run, which would find them, does.
+    let mut planned: HashSet<PathBuf> = HashSet::new();
+
     for entry in &resolved {
         match entry.kind {
-            EntryKind::Dir => create_directory(entry, opts, &listed_paths, &mut stats)?,
-            EntryKind::File => create_file(entry, opts, &mut stats)?,
+            EntryKind::Dir => {
+                create_directory(entry, opts, &listed_paths, &mut stats, &mut planned)?
+            }
+            EntryKind::File => create_file(entry, opts, &mut stats, &mut planned)?,
         }
     }
 
@@ -255,18 +267,47 @@ fn create_directory(
     opts: &BuildOptions,
     listed_paths: &HashSet<&Path>,
     stats: &mut BuildStats,
+    planned: &mut HashSet<PathBuf>,
 ) -> Result<(), AppError> {
     let path = &entry.path;
     let comment = plan_dir_comment(entry, opts, listed_paths);
 
     if opts.dry_run {
-        println!("  [dry-run] 📁 {}", path.display());
-        stats.dirs_created += 1;
+        // Same decisions as the real run below, from read-only disk checks.
+        if path.exists() && !path.is_dir() {
+            // The real run's create_dir_all fails here; promising success
+            // would be a lie.
+            return Err(AppError::io(
+                path,
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "exists and is not a directory",
+                ),
+            ));
+        }
+        let exists = path.is_dir() || planned.contains(path);
+        println!(
+            "  [dry-run] 📁 {}{}",
+            path.display(),
+            if exists { " (exists)" } else { "" }
+        );
+        if !exists {
+            stats.dirs_created += 1;
+            planned.insert(path.clone());
+        }
         match comment {
             DirComment::Nothing => {}
-            DirComment::Write { content, .. } => {
-                println!("              ↳ {DIR_COMMENT_FILE}: {}", one_line(&content));
-                stats.comments_written += 1;
+            DirComment::Write { target, content } => {
+                if (target.exists() || planned.contains(&target)) && !opts.force {
+                    println!(
+                        "              ↳ {DIR_COMMENT_FILE} exists — comment would be skipped"
+                    );
+                    stats.comments_skipped += 1;
+                } else {
+                    println!("              ↳ {DIR_COMMENT_FILE}: {}", one_line(&content));
+                    stats.comments_written += 1;
+                    planned.insert(target);
+                }
             }
             DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
         }
@@ -303,17 +344,34 @@ fn create_file(
     entry: &ResolvedEntry<'_>,
     opts: &BuildOptions,
     stats: &mut BuildStats,
+    planned: &mut HashSet<PathBuf>,
 ) -> Result<(), AppError> {
     let path = &entry.path;
     let content = file_comment_content(entry, opts);
 
     if opts.dry_run {
-        println!("  [dry-run] 📄 {}", path.display());
+        let exists = path.exists() || planned.contains(path);
+        if exists && !opts.force {
+            // The real run skips it, and writes no comment either.
+            println!("  [dry-run] 📄 {} (exists — would skip)", path.display());
+            stats.files_skipped += 1;
+            return Ok(());
+        }
+        println!(
+            "  [dry-run] 📄 {}{}",
+            path.display(),
+            if exists {
+                " (exists — would overwrite)"
+            } else {
+                ""
+            }
+        );
         if let Some(content) = &content {
             println!("              ↳ comment: {}", one_line(content));
             stats.comments_written += 1;
         }
         stats.files_created += 1;
+        planned.insert(path.clone());
         return Ok(());
     }
 
@@ -380,8 +438,13 @@ pub fn print_summary(
 
     if stats.files_skipped > 0 {
         let skipped_str = pluralise(stats.files_skipped, "file", "files");
+        let verb = if dry_run {
+            "would be skipped"
+        } else {
+            "skipped"
+        };
         eprintln!(
-            "  ⚠  {} existing {skipped_str} skipped (use --force to overwrite).",
+            "  ⚠  {} existing {skipped_str} {verb} (use --force to overwrite).",
             stats.files_skipped
         );
     }
@@ -392,8 +455,13 @@ pub fn print_summary(
             "directory comment",
             "directory comments",
         );
+        let (verb, hint) = if dry_run {
+            ("would not be written", "the listing above")
+        } else {
+            ("not written", "the warnings above")
+        };
         eprintln!(
-            "  ⚠  {} {skipped_str} not written (see the warnings above).",
+            "  ⚠  {} {skipped_str} {verb} (see {hint}).",
             stats.comments_skipped
         );
     }
