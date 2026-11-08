@@ -177,6 +177,24 @@ fn truncated_utf16_is_rejected() {
 }
 
 #[test]
+fn utf16_with_a_nul_character_is_refused_before_anything_is_created() {
+    let input = TempDir::new().unwrap();
+    let output = TempDir::new().unwrap();
+    let file = input.path().join("tree.txt");
+    fs::write(&file, utf16_le_bom("ok/\r\n└── a.rs\r\nbad\0name\r\n")).unwrap();
+
+    cmd()
+        .args(["--file", file.to_str().unwrap()])
+        .args(["--output", output.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("NUL"));
+
+    // The valid entries before the bad one must not have been built.
+    assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
+}
+
+#[test]
 fn bom_only_file_is_reported_as_empty_not_as_an_encoding_error() {
     let input = TempDir::new().unwrap();
     let file = input.path().join("tree.txt");

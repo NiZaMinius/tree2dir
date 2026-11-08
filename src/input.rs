@@ -80,9 +80,21 @@ fn decode_utf16(bytes: &[u8], to_unit: fn([u8; 2]) -> u16) -> Result<String, App
         ));
     }
     let units = pairs.iter().map(|pair| to_unit(*pair));
-    char::decode_utf16(units)
+    let text = char::decode_utf16(units)
         .collect::<Result<String, _>>()
-        .map_err(|_| AppError::invalid_encoding("the UTF-16 input contains an unpaired surrogate"))
+        .map_err(|_| {
+            AppError::invalid_encoding("the UTF-16 input contains an unpaired surrogate")
+        })?;
+
+    // The UTF-8 path rejects NUL on the raw bytes; here U+0000 only exists
+    // after decoding. A name with NUL would fail when the builder reaches it,
+    // after earlier entries had already been created.
+    if text.contains('\0') {
+        return Err(AppError::invalid_encoding(
+            "the input contains NUL characters, so it is not a plain text file",
+        ));
+    }
+    Ok(text)
 }
 
 /// UTF-16 text made of mostly ASCII has a zero byte next to every letter.
@@ -158,6 +170,16 @@ mod tests {
         assert!(err.contains("not valid UTF-8"), "{err}");
         assert!(err.contains("Windows-1251"), "{err}");
         assert!(err.contains("UTF-8"), "{err}");
+    }
+
+    #[test]
+    fn nul_character_in_utf16_is_rejected_like_in_utf8() {
+        // A BOM-marked file decodes cleanly, so the check on the raw UTF-8
+        // bytes never sees this NUL.
+        for encode in [utf16_le, utf16_be] {
+            let err = decode(&encode("ok/\nbad\0name")).unwrap_err().to_string();
+            assert!(err.contains("NUL"), "{err}");
+        }
     }
 
     #[test]
