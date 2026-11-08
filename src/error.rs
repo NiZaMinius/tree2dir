@@ -30,6 +30,13 @@ pub enum AppError {
     #[error("Unsafe path detected (path traversal): `{0}`")]
     UnsafePath(PathBuf),
 
+    /// A path that would be written resolves outside the output root through
+    /// a symbolic link (or junction), even though its text stays inside.
+    #[error(
+        "Refusing to write `{0}`: it leads outside the output directory through a symbolic link."
+    )]
+    SymlinkEscape(PathBuf),
+
     // ── Filesystem conflicts ─────────────────────────────────────────────────
     /// A target file already exists and `--force` was not supplied.
     ///

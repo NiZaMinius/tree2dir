@@ -10,6 +10,16 @@
 //!
 //! When `--force` **is** set, existing files are overwritten unconditionally.
 //!
+//! # Symbolic links
+//!
+//! The path checks while resolving entries are lexical, so they cannot see that
+//! `out/link` is really `/elsewhere`.  Before any write the builder resolves
+//! the deepest part of the target that already exists and refuses
+//! ([`AppError::SymlinkEscape`]) if it lands outside the output root.  Links
+//! that stay inside the root are fine, and so is an output root that is itself
+//! a link.  The check and the write are separate steps, so it does not defend
+//! against another process swapping a link in between.
+//!
 //! # Directory comments
 //!
 //! A directory comment goes to `COMMENT.md` inside that directory, under the
@@ -117,12 +127,15 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
     // find them, does.
     let mut planned: HashMap<PathBuf, EntryKind> = HashMap::new();
 
+    // Created after the root so that a root which had to be made is resolved.
+    let guard = RootGuard::new(&opts.output_root);
+
     for entry in &resolved {
         match entry.kind {
             EntryKind::Dir => {
-                create_directory(entry, opts, &listed_paths, &mut stats, &mut planned)?
+                create_directory(entry, opts, &listed_paths, &mut stats, &mut planned, &guard)?
             }
-            EntryKind::File => create_file(entry, opts, &mut stats, &mut planned)?,
+            EntryKind::File => create_file(entry, opts, &mut stats, &mut planned, &guard)?,
         }
     }
 
@@ -132,6 +145,48 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Refuses writes that would leave the output root through a symbolic link.
+struct RootGuard {
+    /// The output root with every link resolved; `None` when it does not exist
+    /// yet (a dry run into a new directory), in which case nothing below it
+    /// can be a link either.
+    canonical_root: Option<PathBuf>,
+}
+
+impl RootGuard {
+    fn new(root: &Path) -> Self {
+        Self {
+            canonical_root: fs::canonicalize(root).ok(),
+        }
+    }
+
+    /// Fail if writing `path` would end up outside the root.
+    ///
+    /// The deepest existing component is found with `symlink_metadata`, which
+    /// does not follow links: a dangling link must count as existing, because
+    /// `fs::write` through it creates its target.  Resolving that component
+    /// with `canonicalize` follows every link on the way, junctions included.
+    /// A link that cannot be resolved is refused.
+    fn check(&self, path: &Path) -> Result<(), AppError> {
+        let Some(root) = &self.canonical_root else {
+            return Ok(());
+        };
+
+        let mut existing = path;
+        while fs::symlink_metadata(existing).is_err() {
+            match existing.parent() {
+                Some(parent) => existing = parent,
+                None => return Ok(()),
+            }
+        }
+
+        match fs::canonicalize(existing) {
+            Ok(real) if real.starts_with(root) => Ok(()),
+            _ => Err(AppError::SymlinkEscape(path.to_path_buf())),
+        }
+    }
+}
 
 fn ensure_within_root(full_path: &Path, root: &Path) -> Result<(), AppError> {
     let root_c: Vec<_> = root.components().collect();
@@ -295,8 +350,10 @@ fn create_directory(
     listed_paths: &HashSet<&Path>,
     stats: &mut BuildStats,
     planned: &mut HashMap<PathBuf, EntryKind>,
+    guard: &RootGuard,
 ) -> Result<(), AppError> {
     let path = &entry.path;
+    guard.check(path)?;
     let comment = plan_dir_comment(entry, opts, listed_paths);
 
     if opts.dry_run {
@@ -319,6 +376,7 @@ fn create_directory(
         match comment {
             DirComment::Nothing => {}
             DirComment::Write { target, content } => {
+                guard.check(&target)?;
                 let exists = target.exists() || planned.contains_key(&target);
                 if exists && opts.force && is_dir_or_planned(&target, planned) {
                     // fs::write cannot replace a directory.
@@ -351,6 +409,7 @@ fn create_directory(
         DirComment::Nothing => {}
         DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
         DirComment::Write { target, content } => {
+            guard.check(&target)?;
             if target.exists() && !opts.force {
                 warn(format!(
                     "{} already exists, directory comment skipped (use --force to overwrite)",
@@ -371,8 +430,10 @@ fn create_file(
     opts: &BuildOptions,
     stats: &mut BuildStats,
     planned: &mut HashMap<PathBuf, EntryKind>,
+    guard: &RootGuard,
 ) -> Result<(), AppError> {
     let path = &entry.path;
+    guard.check(path)?;
     let content = file_comment_content(entry, opts);
 
     if opts.dry_run {
