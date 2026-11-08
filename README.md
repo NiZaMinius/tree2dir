@@ -204,6 +204,16 @@ drive prefix to escape the target directory. This is checked both on the
 raw path segment and on the final joined path, so it holds even if a
 segment slips past the first check.
 
+Those checks are about the text of a path. A symbolic link (or Windows junction)
+inside the output directory can still point somewhere else, so before every write
+tree2dir also resolves the part of the target that already exists and refuses to
+continue if it ends up outside the output directory (`--dry-run` refuses too).
+Links that stay inside the output directory are fine, and so is an output
+directory that is itself a link. A link that cannot be resolved is refused,
+because writing through a dangling link creates its target. The check and the
+write are separate steps, so this does not protect against another process
+swapping a link in between.
+
 ## Building from source
 
 ```bash
