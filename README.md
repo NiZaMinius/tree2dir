@@ -91,6 +91,14 @@ cat structure.txt | tree2dir
 tree2dir --file structure.txt --output ./my-project
 ```
 
+### Input encoding and line endings
+
+`--file` and piped input can be UTF-8 (with or without a BOM) or UTF-16 with a
+BOM — the encoding PowerShell 5.1 uses for `>` redirection. Lines may end in
+LF, CRLF or CR. Any other encoding (a legacy code page such as Windows-1251,
+UTF-16 without a BOM, UTF-32) is rejected with instructions for re-saving the
+file as UTF-8, instead of being guessed at and producing mangled file names.
+
 ### Flags
 
 | Flag | Description |
