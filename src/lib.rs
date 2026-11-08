@@ -8,6 +8,7 @@ pub mod cli;
 pub mod comments;
 pub mod error;
 pub mod fs_builder;
+mod input;
 pub mod parser;
 pub mod tui;
 
@@ -97,18 +98,19 @@ fn read_input(cli: &Cli) -> anyhow::Result<Option<String>> {
     tui::run_tui()
 }
 
-/// Read the entire contents of `path` into a `String`.
+/// Read `path` and decode it (see [`input::decode`]).
 fn read_file(path: &PathBuf) -> anyhow::Result<String> {
-    std::fs::read_to_string(path)
-        .with_context(|| format!("Could not read file `{}`", path.display()))
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Could not read file `{}`", path.display()))?;
+    input::decode(&bytes).with_context(|| format!("Could not decode file `{}`", path.display()))
 }
 
-/// Read all of stdin into a `String`.
+/// Read all of stdin and decode it (see [`input::decode`]).
 fn read_stdin() -> anyhow::Result<String> {
-    let mut buffer = String::new();
+    let mut bytes = Vec::new();
     io::stdin()
         .lock()
-        .read_to_string(&mut buffer)
+        .read_to_end(&mut bytes)
         .context("Failed to read from stdin")?;
-    Ok(buffer)
+    input::decode(&bytes).context("Could not decode the data read from stdin")
 }

@@ -654,3 +654,30 @@ fn comments_and_comment_lines_leave_depth_and_kind_unchanged() {
     };
     assert_eq!(shape(&plain), shape(&noisy));
 }
+
+// ---------------------------------------------------------------------------
+// Line endings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_line_ending_style_parses_identically() {
+    let lf = "root/\n├── a.rs # one\n└── b.rs\n";
+    let expected = parse_tree(lf);
+    assert_eq!(expected.len(), 3);
+
+    for (label, text) in [
+        ("CRLF", lf.replace('\n', "\r\n")),
+        ("CR", lf.replace('\n', "\r")),
+        ("mixed", "root/\r\n├── a.rs # one\r└── b.rs\n".to_string()),
+    ] {
+        assert_eq!(parse_tree(&text), expected, "{label}");
+    }
+}
+
+#[test]
+fn carriage_return_never_ends_up_in_names_or_comments() {
+    for node in parse_tree("a.rs # note\r\nb.rs\r\n") {
+        assert!(!node.name.contains('\r'), "{:?}", node.name);
+        assert!(!node.comment.unwrap_or_default().contains('\r'));
+    }
+}

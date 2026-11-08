@@ -82,8 +82,12 @@ struct RawEntry {
 pub fn parse_tree(input: &str) -> Vec<TreeNode> {
     // Split every line once up front: the directory heuristic needs the depth
     // of the next *surviving* line, and skipped lines must not influence it.
+    //
+    // Lines end at `\n`, `\r\n` or a lone `\r` (classic Mac text).  Splitting on
+    // either character is safe because blank lines are dropped below: the
+    // empty piece between the `\r` and `\n` of a CRLF pair simply vanishes.
     let entries: Vec<RawEntry> = input
-        .lines()
+        .split(['\n', '\r'])
         .filter_map(|line| {
             let (depth, text) = split_prefix(line)?;
             // Also catches comment lines hidden behind glyphs (`│   # note`),

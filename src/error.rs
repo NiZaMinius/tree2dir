@@ -26,6 +26,14 @@ pub enum AppError {
     #[error("The input tree was empty or contained no recognisable entries.")]
     EmptyInput,
 
+    /// The input bytes are not text in a supported encoding.
+    #[error(
+        "Cannot read the input as text: {reason}.\n\
+         Save it as UTF-8 and try again (Notepad: File > Save As > Encoding: UTF-8; \
+         PowerShell: `Get-Content old.txt | Set-Content -Encoding utf8 new.txt`)."
+    )]
+    InvalidEncoding { reason: String },
+
     /// A path that would be created escapes the output root via `..` segments.
     #[error("Unsafe path detected (path traversal): `{0}`")]
     UnsafePath(PathBuf),
@@ -69,6 +77,13 @@ impl AppError {
         Self::Io {
             path: path.into(),
             source,
+        }
+    }
+
+    /// Convenience constructor for [`AppError::InvalidEncoding`].
+    pub fn invalid_encoding(reason: impl Into<String>) -> Self {
+        Self::InvalidEncoding {
+            reason: reason.into(),
         }
     }
 
