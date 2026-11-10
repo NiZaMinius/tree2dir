@@ -65,6 +65,61 @@ fn windows_structure() -> Vec<(usize, String, EntryKind)> {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn windows_tree_f_a_with_english_header() {
+    assert_eq!(shape(WINDOWS_ASCII), windows_structure());
+}
+
+#[test]
+fn windows_header_in_another_language_is_dropped_too() {
+    let input = WINDOWS_ASCII
+        .replace(
+            "Folder PATH listing for volume Data",
+            "Структура папок тома Data",
+        )
+        .replace(
+            "Volume serial number is 1234-5678",
+            "Серийный номер тома: 1234-5678",
+        );
+    assert_eq!(shape(&input), windows_structure());
+}
+
+#[test]
+fn windows_tree_f_with_unicode_glyphs_and_header() {
+    let input = "\
+Folder PATH listing for volume Data
+Volume serial number is 1234-5678
+D:.
+│   .gitignore
+│   Cargo.toml
+│   
+├───src
+│   │   main.rs
+│   │   
+│   └───util
+│           mod.rs
+│           
+└───tests
+        cli.rs
+        
+";
+    assert_eq!(shape(input), windows_structure());
+}
+
+#[test]
+fn windows_drive_line_with_a_path_names_the_root_directory() {
+    let input = "C:\\Users\\me\\proj\n+---src\n|       a.rs\n\\---docs\n";
+    assert_eq!(
+        shape(input),
+        expect(&[
+            (0, "proj", Dir),
+            (4, "src", Dir),
+            (8, "a.rs", File),
+            (4, "docs", File),
+        ])
+    );
+}
+
+#[test]
 fn windows_tree_without_a_header_still_parses() {
     // Files of `src` are printed under its own guide: `|` plus seven spaces.
     let input = "+---src\n|       a.rs\n\\---docs\n";
@@ -100,6 +155,37 @@ fn gnu_structure() -> Vec<(usize, String, EntryKind)> {
         (4, "tests", Dir),
         (8, "cli.rs", File),
     ])
+}
+
+#[test]
+fn gnu_tree_charset_ascii_with_summary_line() {
+    assert_eq!(shape(GNU_ASCII), gnu_structure());
+}
+
+#[test]
+fn gnu_tree_unicode_with_non_breaking_spaces() {
+    // GNU tree prints `│` followed by two U+00A0 and a space.
+    let input = GNU_ASCII
+        .replace("|-- ", "├── ")
+        .replace("`-- ", "└── ")
+        .replace("|   ", "│\u{a0}\u{a0} ");
+    assert_eq!(shape(&input), gnu_structure());
+}
+
+#[test]
+fn gnu_summary_line_in_other_languages_and_singular_forms() {
+    for summary in [
+        "1 directory, 1 file",
+        "2 каталога, 3 файла",
+        "10 Verzeichnisse, 20 Dateien",
+    ] {
+        let input = format!("src\n    a.rs\n\n{summary}\n");
+        assert_eq!(
+            shape(&input),
+            expect(&[(0, "src", Dir), (4, "a.rs", File)]),
+            "{summary}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +249,24 @@ a---b
 }
 
 #[test]
+fn a_last_line_with_one_count_is_a_real_entry_not_a_summary() {
+    let nodes = shape("a.rs\n\n3 notes\n");
+    assert_eq!(nodes.last().unwrap().1, "3 notes");
+}
+
+#[test]
+fn a_summary_shaped_line_without_a_blank_line_before_it_is_kept() {
+    let nodes = shape("a.rs\n2 directories, 3 files\n");
+    assert_eq!(nodes.len(), 2);
+}
+
+#[test]
+fn a_drive_like_first_line_far_from_the_top_is_not_a_header() {
+    let input = "a.rs\nb.rs\nc.rs\nd.rs\ne.rs\nD:.\n";
+    assert_eq!(shape(input).len(), 6);
+}
+
+#[test]
 fn existing_unicode_and_space_trees_parse_as_before() {
     let input = "my-app/\n├── src/\n│   └── main.rs\n└── README.md\n";
     assert_eq!(
@@ -215,6 +319,40 @@ fn listing(root: &Path) -> Vec<String> {
     walk(root, root, &mut out);
     out.sort();
     out
+}
+
+#[test]
+fn windows_ascii_tree_builds_the_real_structure() {
+    let out = build(WINDOWS_ASCII);
+    assert_eq!(
+        listing(out.path()),
+        [
+            ".gitignore",
+            "Cargo.toml",
+            "src/",
+            "src/main.rs",
+            "src/util/",
+            "src/util/mod.rs",
+            "tests/",
+            "tests/cli.rs",
+        ]
+    );
+}
+
+#[test]
+fn gnu_ascii_tree_builds_the_real_structure_without_the_summary_line() {
+    let out = build(GNU_ASCII);
+    assert_eq!(
+        listing(out.path()),
+        [
+            "Cargo.toml",
+            "src/",
+            "src/lib.rs",
+            "src/main.rs",
+            "tests/",
+            "tests/cli.rs",
+        ]
+    );
 }
 
 #[test]

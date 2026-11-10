@@ -29,7 +29,11 @@
 //!
 //! The ASCII connectors are recognised only in these exact forms and only at
 //! the start of a line, so names such as `+layout.svelte`, `-flag` or `|pipe`
-//! stay names.
+//! stay names.  Text that is not part of the tree is dropped: the volume header
+//! and drive line of Windows `tree` (whatever the Windows language), and the
+//! summary line of GNU `tree` (`2 directories, 4 files`).  A drive line with a
+//! path (`C:\Users\me\proj`) becomes the root directory `proj`; `D:.` is dropped,
+//! so the tree is built in the output directory itself.
 //!
 //! # Comments
 //!
@@ -42,6 +46,8 @@
 //! - A name wrapped in `"…"` or `'…'` may contain spaces and `#`.  The
 //!   closing quote must be followed by nothing, a `/`, or a `#` comment;
 //!   otherwise the quote belongs to an ordinary name (`'tis.txt`).
+
+use std::borrow::Cow;
 
 use crate::parser::tree_node::{EntryKind, TreeNode};
 
@@ -115,6 +121,88 @@ struct RawEntry {
     comment: Option<String>,
 }
 
+/// How many non-blank lines from the top may precede a Windows drive line.
+const HEADER_SEARCH_LINES: usize = 4;
+
+/// The lines of `input` that belong to the tree: Windows volume header and
+/// drive line, and the GNU summary line, removed (see the module docs).
+fn tree_lines(input: &str) -> Vec<Cow<'_, str>> {
+    let mut lines: Vec<&str> = input.split(['\n', '\r']).collect();
+
+    // GNU `tree` ends with a blank line and "N directories, M files".  The
+    // blank line is required so that a real entry such as "3 notes" survives.
+    if let Some(last) = lines.iter().rposition(|line| !line.trim().is_empty()) {
+        if last > 0 && lines[last - 1].trim().is_empty() && is_summary_line(lines[last]) {
+            lines.truncate(last);
+        }
+    }
+
+    // Windows `tree` starts with a localized header and a drive line.  The
+    // header's wording depends on the Windows language, so it is recognised by
+    // position: everything before a drive line near the top.
+    let mut non_blank = 0;
+    for (index, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        non_blank += 1;
+        if non_blank > HEADER_SEARCH_LINES {
+            break;
+        }
+        if let Some(root) = windows_drive_root(line) {
+            let mut kept: Vec<Cow<'_, str>> = Vec::with_capacity(lines.len());
+            if let Some(name) = root {
+                kept.push(Cow::Owned(format!("{name}/")));
+            }
+            kept.extend(lines[index + 1..].iter().copied().map(Cow::Borrowed));
+            return kept;
+        }
+    }
+
+    lines.into_iter().map(Cow::Borrowed).collect()
+}
+
+/// `2 directories, 4 files` and its translations: at least two
+/// "<number> <word>" parts separated by commas.
+fn is_summary_line(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let parts: Vec<&str> = line.trim_end().split(", ").collect();
+    parts.len() >= 2
+        && parts.iter().all(|part| {
+            part.split_once(' ').is_some_and(|(count, word)| {
+                !count.is_empty()
+                    && count.chars().all(|c| c.is_ascii_digit())
+                    && !word.is_empty()
+                    && !word.chars().any(|c| c.is_ascii_digit())
+            })
+        })
+}
+
+/// A Windows drive line: `D:.` or `C:\some\path`.
+///
+/// Returns `None` when `line` is not one.  Otherwise `Some(None)` means "drop
+/// it" (`D:.`, `C:\`), and `Some(Some(name))` is the last path component, which
+/// becomes the root directory.
+fn windows_drive_root(line: &str) -> Option<Option<&str>> {
+    let line = line.trim_end();
+    let mut chars = line.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    let rest = line[letter.len_utf8()..].strip_prefix(':')?;
+
+    if rest == "." {
+        return Some(None);
+    }
+    let path = rest.strip_prefix(['\\', '/'])?;
+    let name = path
+        .trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|name| !name.is_empty());
+    Some(name)
+}
+
 /// Parse an ASCII / Unicode directory tree string into a flat list of
 /// [`TreeNode`] values.
 ///
@@ -131,8 +219,8 @@ pub fn parse_tree(input: &str) -> Vec<TreeNode> {
     // Lines end at `\n`, `\r\n` or a lone `\r` (classic Mac text).  Splitting on
     // either character is safe because blank lines are dropped below: the
     // empty piece between the `\r` and `\n` of a CRLF pair simply vanishes.
-    let entries: Vec<RawEntry> = input
-        .split(['\n', '\r'])
+    let entries: Vec<RawEntry> = tree_lines(input)
+        .iter()
         .filter_map(|line| {
             let (depth, text) = split_prefix(line)?;
             // Also catches comment lines hidden behind glyphs (`│   # note`),
