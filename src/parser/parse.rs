@@ -19,6 +19,18 @@
 //!    greater depth → **Directory**.
 //! 3. Otherwise → **File**.
 //!
+//! # Output of `tree` commands
+//!
+//! Pasted output of real tools is accepted as is:
+//!
+//! - GNU `tree`, Unicode or `--charset=ascii` (`|-- `, `` `-- ``), including the
+//!   non-breaking spaces it prints inside `│` guides.
+//! - Windows `tree` and `tree /a` (`+---`, `\---`, `|   `).
+//!
+//! The ASCII connectors are recognised only in these exact forms and only at
+//! the start of a line, so names such as `+layout.svelte`, `-flag` or `|pipe`
+//! stay names.
+//!
 //! # Comments
 //!
 //! - A line whose content starts with `#` (after the indentation and any
@@ -34,9 +46,10 @@
 use crate::parser::tree_node::{EntryKind, TreeNode};
 
 /// Characters that constitute tree indentation guide lines rather than entry
-/// names.  Any prefix composed exclusively of these scalars is treated as
+/// names.  U+00A0 is there because GNU `tree` prints non-breaking spaces inside
+/// its `│` guides.  Any prefix composed exclusively of these scalars is treated as
 /// visual decoration and excluded from the entry name.
-const INDENT_CHARS: &[char] = &[' ', '\t', '│', '├', '└', '─'];
+const INDENT_CHARS: &[char] = &[' ', '\t', '\u{a0}', '│', '├', '└', '─'];
 
 /// Split a raw input line into a `(visual_depth, entry_name)` pair.
 ///
@@ -46,20 +59,52 @@ const INDENT_CHARS: &[char] = &[' ', '\t', '│', '├', '└', '─'];
 /// Returns `None` if the line consists entirely of indentation characters
 /// (i.e., the name would be empty).
 pub fn split_prefix(line: &str) -> Option<(usize, &str)> {
-    let boundary = line
-        .char_indices()
-        .find(|(_, c)| !INDENT_CHARS.contains(c))
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(line.len());
+    let mut boundary = 0;
+    let mut depth = 0;
 
-    let prefix = &line[..boundary];
+    while boundary < line.len() {
+        let rest = &line[boundary..];
+
+        // An ASCII connector ends the prefix: the name follows it directly,
+        // and must not be mistaken for more drawing characters.
+        if let Some(connector) = ascii_connector(rest) {
+            boundary += connector.len();
+            depth += connector.chars().count();
+            break;
+        }
+
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if INDENT_CHARS.contains(&ch) || is_ascii_guide(rest) {
+            boundary += ch.len_utf8();
+            depth += 1;
+        } else {
+            break;
+        }
+    }
+
     let name = line[boundary..].trim_end();
-
     if name.is_empty() {
         return None;
     }
+    Some((depth, name))
+}
 
-    Some((prefix.chars().count(), name))
+/// The four-character ASCII connectors: `+---` and `\---` (Windows `tree /a`),
+/// `|-- ` and `` `-- `` (GNU `tree --charset=ascii`).
+fn ascii_connector(text: &str) -> Option<&str> {
+    ["+---", "\\---", "|-- ", "`-- "]
+        .into_iter()
+        .find(|connector| text.starts_with(connector))
+        .map(|connector| &text[..connector.len()])
+}
+
+/// A `|` that continues a branch (`|   `): it must be followed by whitespace or
+/// the end of the line, so that a name such as `|pipe` is left alone.
+fn is_ascii_guide(text: &str) -> bool {
+    text.strip_prefix('|')
+        .is_some_and(|after| after.is_empty() || after.starts_with(char::is_whitespace))
 }
 
 /// One surviving input line before directory/file classification.
