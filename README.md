@@ -185,6 +185,19 @@ Details worth knowing:
 | Arrow keys, `Home`, `End` | Move the cursor |
 | `Backspace`, `Delete` | Edit text |
 
+## Pasting `tree` output
+
+Output of these commands can be pasted as is:
+
+| Command | What is handled |
+|---|---|
+| GNU `tree` (Linux, macOS) | Unicode or `--charset=ascii`; the non-breaking spaces it prints; the final "N directories, M files" line is ignored |
+| Windows `tree /f` and `tree /f /a` | the volume header and the drive line are ignored, in any Windows language; a drive line with a path (`C:\Users\me\proj`) names the root directory `proj`, while `D:.` builds the tree in the output directory |
+
+`tree` does not mark empty directories, so an empty directory in raw output
+is created as a file unless you add a trailing `/`. Names that merely look like
+drawing characters (`+layout.svelte`, `-flag`, `|pipe`) stay names.
+
 ## How the parser works
 
 Indentation is measured by counting **Unicode scalar values**
