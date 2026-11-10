@@ -29,8 +29,10 @@ pub enum AppError {
     /// The input bytes are not text in a supported encoding.
     #[error(
         "Cannot read the input as text: {reason}.\n\
-         Save it as UTF-8 and try again (Notepad: File > Save As > Encoding: UTF-8; \
-         PowerShell: `Get-Content old.txt | Set-Content -Encoding utf8 new.txt`)."
+         Save it as UTF-8 and try again (Notepad: File > Save As > Encoding: UTF-8).\n\
+         If it is the output of the Windows `tree` command, create it as UTF-8: \
+         in cmd `chcp 65001 > nul & tree /f /a > tree.txt`, \
+         in PowerShell `tree /f /a | Out-File -Encoding utf8 tree.txt`."
     )]
     InvalidEncoding { reason: String },
 
