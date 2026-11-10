@@ -148,6 +148,31 @@ fn windows_1251_file_is_rejected_with_instructions() {
 }
 
 #[test]
+fn windows_tree_output_in_the_oem_code_page_explains_how_to_get_utf8() {
+    // `tree.com` writes a redirected file in the console's OEM code page; this
+    // is a Russian Windows header in cp866.
+    let input = TempDir::new().unwrap();
+    let file = input.path().join("tree.txt");
+    let header: &[u8] = &[
+        0x91, 0xE2, 0xE0, 0xE3, 0xAA, 0xE2, 0xE3, 0xE0, 0xA0, 0x20, 0xAF, 0xA0, 0xAF, 0xAE, 0xAA,
+    ];
+    let mut bytes = header.to_vec();
+    bytes.extend(b"\r\nD:.\r\n+---src\r\n");
+    fs::write(&file, bytes).unwrap();
+
+    cmd()
+        .args(["--file", file.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not valid UTF-8"))
+        .stderr(predicate::str::contains("chcp 65001"))
+        .stderr(predicate::str::contains("Out-File -Encoding utf8"))
+        // Get-Content reads the ANSI page, not the OEM one: it would turn this
+        // file into mojibake.
+        .stderr(predicate::str::contains("Get-Content").not());
+}
+
+#[test]
 fn utf16_without_bom_is_rejected_and_named() {
     let input = TempDir::new().unwrap();
     let file = input.path().join("tree.txt");
