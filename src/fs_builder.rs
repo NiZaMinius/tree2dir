@@ -17,8 +17,11 @@
 //! the deepest part of the target that already exists and refuses
 //! ([`AppError::SymlinkEscape`]) if it lands outside the output root.  Links
 //! that stay inside the root are fine, and so is an output root that is itself
-//! a link.  The check and the write are separate steps, so it does not defend
-//! against another process swapping a link in between.
+//! a link.  A directory resolved for one entry is remembered for its siblings,
+//! but each use confirms with one `lstat` that it is still not a link.  The
+//! check and the write are separate steps, so another process swapping a link
+//! in between them, or replacing a directory further up than the one
+//! re-checked, is not defended against.
 //!
 //! # Directory comments
 //!
@@ -194,7 +197,7 @@ struct RootGuard {
     canonical_root: Option<PathBuf>,
     /// Directories already resolved and found to be inside the root.  The
     /// entries of one directory share it, so it is resolved once, not once
-    /// per entry.
+    /// per entry; each use still re-checks that it is not a link now.
     verified: RefCell<HashSet<PathBuf>>,
 }
 
@@ -251,27 +254,37 @@ impl RootGuard {
 
     /// Check the deepest existing part of `dir`; `whole` is the path being
     /// written, for the error.
+    ///
+    /// A remembered directory is not taken on trust: one `symlink_metadata`
+    /// confirms it is still not a link.  Otherwise something that replaced it
+    /// with a link after its first check would be trusted for the rest of the
+    /// build, not just for a single entry.
     fn verify_directory(&self, dir: &Path, whole: &Path, root: &Path) -> Result<(), AppError> {
-        if self.verified.borrow().contains(dir) {
+        let mut existing = dir;
+        let meta = loop {
+            match fs::symlink_metadata(existing) {
+                Ok(meta) => break meta,
+                Err(_) => match existing.parent() {
+                    Some(parent) => existing = parent,
+                    None => return Ok(()),
+                },
+            }
+        };
+
+        if !meta.file_type().is_symlink() && self.verified.borrow().contains(existing) {
             return Ok(());
         }
 
-        let mut existing = dir;
-        while fs::symlink_metadata(existing).is_err() {
-            match existing.parent() {
-                Some(parent) => existing = parent,
-                None => return Ok(()),
+        match fs::canonicalize(existing) {
+            Ok(real) if real.starts_with(root) => {
+                self.verified.borrow_mut().insert(existing.to_path_buf());
+                Ok(())
+            }
+            _ => {
+                self.verified.borrow_mut().remove(existing);
+                Err(AppError::SymlinkEscape(whole.to_path_buf()))
             }
         }
-
-        if !self.verified.borrow().contains(existing) {
-            match fs::canonicalize(existing) {
-                Ok(real) if real.starts_with(root) => {}
-                _ => return Err(AppError::SymlinkEscape(whole.to_path_buf())),
-            }
-            self.verified.borrow_mut().insert(existing.to_path_buf());
-        }
-        Ok(())
     }
 }
 
@@ -688,5 +701,69 @@ fn pluralise<'a>(n: usize, singular: &'a str, plural: &'a str) -> &'a str {
         singular
     } else {
         plural
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A root with a directory `d` inside it, and a directory beside the root.
+    fn arena() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("out");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(root.join("d")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        (tmp, root, outside)
+    }
+
+    #[test]
+    fn a_remembered_directory_replaced_by_a_link_is_noticed() {
+        let (_tmp, root, outside) = arena();
+        let guard = RootGuard::new(&root);
+
+        // `d` is verified and remembered by the first entry...
+        assert!(guard.inspect(&root.join("d/a.txt")).is_ok());
+
+        // ...then something swaps it for a link out of the root.
+        fs::remove_dir(root.join("d")).unwrap();
+        symlink(&outside, root.join("d")).unwrap();
+
+        // The next sibling must not be trusted on the strength of the old check.
+        let result = guard.inspect(&root.join("d/b.txt"));
+        assert!(
+            matches!(result, Err(AppError::SymlinkEscape(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_remembered_directory_replaced_by_a_link_inside_the_root_is_still_fine() {
+        let (_tmp, root, _outside) = arena();
+        fs::create_dir(root.join("real")).unwrap();
+        let guard = RootGuard::new(&root);
+        assert!(guard.inspect(&root.join("d/a.txt")).is_ok());
+
+        fs::remove_dir(root.join("d")).unwrap();
+        symlink(root.join("real"), root.join("d")).unwrap();
+
+        assert!(guard.inspect(&root.join("d/b.txt")).is_ok());
+    }
+
+    #[test]
+    fn a_remembered_directory_that_disappears_is_not_an_error() {
+        let (_tmp, root, _outside) = arena();
+        let guard = RootGuard::new(&root);
+        assert!(guard.inspect(&root.join("d/a.txt")).is_ok());
+
+        fs::remove_dir(root.join("d")).unwrap();
+
+        // Nothing is there any more, so the entry is simply new.
+        assert!(matches!(guard.inspect(&root.join("d/b.txt")), Ok(None)));
     }
 }
