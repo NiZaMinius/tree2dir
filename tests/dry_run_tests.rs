@@ -451,3 +451,95 @@ fn dry_run_fails_clearly_when_a_directory_would_collide_with_a_file() {
         .failure()
         .stderr(predicate::str::contains("proj"));
 }
+
+// ---------------------------------------------------------------------------
+// The listing and the warnings are printed in one go; nothing may be lost
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dry_run_prints_what_it_listed_before_failing() {
+    let input = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let tree = input.path().join("tree.txt");
+    fs::write(&tree, "a.txt\nb.txt\nx\nx/\n").unwrap();
+
+    let assert = cmd()
+        .args(["--file", tree.to_str().unwrap()])
+        .args(["--output", out.path().to_str().unwrap()])
+        .arg("--dry-run")
+        .assert()
+        .failure();
+
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(stdout.contains("a.txt"), "{stdout}");
+    assert!(stdout.contains("b.txt"), "{stdout}");
+}
+
+#[test]
+fn every_skipped_file_is_still_warned_about() {
+    let input = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let tree = input.path().join("tree.txt");
+    let names: Vec<String> = (0..25).map(|i| format!("f{i}.txt")).collect();
+    fs::write(&tree, names.join("\n") + "\n").unwrap();
+    let run = || {
+        cmd()
+            .args(["--file", tree.to_str().unwrap()])
+            .args(["--output", out.path().to_str().unwrap()])
+            .assert()
+            .success()
+    };
+    run();
+
+    let second = run();
+
+    let stderr = String::from_utf8_lossy(&second.get_output().stderr).into_owned();
+    assert_eq!(stderr.matches("already exists").count(), 25, "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// A root entry named `.` is the output directory itself (GNU `tree` prints one)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_root_entry_named_dot_builds_in_the_output_directory() {
+    let out = TempDir::new().unwrap();
+    let nodes = parse_tree(".\n├── a.rs\n└── src\n    └── b.rs\n");
+
+    for dry_run in [true, false] {
+        let result = build(&nodes, &opts(out.path(), dry_run, false, CommentMode::All));
+        assert!(result.is_ok(), "dry_run={dry_run}: {result:?}");
+    }
+
+    assert!(out.path().join("a.rs").is_file());
+    assert!(out.path().join("src/b.rs").is_file());
+}
+
+#[test]
+fn a_dot_entry_below_a_directory_is_that_directory() {
+    let out = TempDir::new().unwrap();
+    let nodes = parse_tree("proj/\n└── ./\n    └── a.rs\n");
+
+    let result = build(&nodes, &opts(out.path(), false, false, CommentMode::None));
+
+    assert!(result.is_ok(), "{result:?}");
+    assert!(out.path().join("proj/a.rs").is_file());
+}
+
+#[test]
+fn a_root_entry_named_dot_works_with_a_relative_output_directory() {
+    let dir = TempDir::new().unwrap();
+    let tree = dir.path().join("tree.txt");
+    fs::write(&tree, ".\n├── a.rs\n└── b.rs\n").unwrap();
+
+    // `--output .` is the default; the check must not mistake the root's
+    // parent for something outside the root.
+    cmd()
+        .current_dir(dir.path())
+        .args(["--file", "tree.txt"])
+        .assert()
+        .success();
+
+    assert!(dir.path().join("a.rs").is_file());
+    assert!(dir.path().join("b.rs").is_file());
+}

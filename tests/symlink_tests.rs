@@ -230,3 +230,63 @@ fn cli_dry_run_refuses_too() {
         .failure()
         .stderr(predicate::str::contains("symbolic link"));
 }
+
+// ---------------------------------------------------------------------------
+// The guard remembers verified directories; that must not let anything through
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_verified_directory_does_not_vouch_for_its_siblings() {
+    let a = arena();
+    symlink(&a.outside, a.out.join("bad")).unwrap();
+    // `ok/` is checked and remembered first; `bad/` must still be refused.
+    let tree = "ok/\n├── a.txt\n└── b.txt\nbad/\n└── c.txt\n";
+
+    for dry_run in [true, false] {
+        let result = build(
+            &parse_tree(tree),
+            &opts(&a.out, dry_run, false, CommentMode::None),
+        );
+        assert!(is_escape(&result), "dry_run={dry_run}: {result:?}");
+        assert!(outside_is_untouched(&a));
+    }
+}
+
+#[test]
+fn a_verified_parent_does_not_vouch_for_a_symlinked_file_below_it() {
+    let a = arena();
+    fs::create_dir(a.out.join("d")).unwrap();
+    fs::write(a.outside.join("victim"), "precious").unwrap();
+    symlink(a.outside.join("victim"), a.out.join("d/evil.txt")).unwrap();
+    // Plenty of plain files first, so `d` is long since verified.
+    let tree = "d/\n├── 1.txt\n├── 2.txt\n├── 3.txt\n└── evil.txt\n";
+
+    for dry_run in [true, false] {
+        let result = build(
+            &parse_tree(tree),
+            &opts(&a.out, dry_run, true, CommentMode::None),
+        );
+        assert!(is_escape(&result), "dry_run={dry_run}: {result:?}");
+        assert_eq!(
+            fs::read_to_string(a.outside.join("victim")).unwrap(),
+            "precious"
+        );
+    }
+}
+
+#[test]
+fn a_verified_ancestor_does_not_vouch_for_a_symlinked_subdirectory() {
+    let a = arena();
+    fs::create_dir(a.out.join("a")).unwrap();
+    symlink(&a.outside, a.out.join("a/b")).unwrap();
+    let tree = "a/\n├── x.txt\n└── b/\n    └── c.txt\n";
+
+    for dry_run in [true, false] {
+        let result = build(
+            &parse_tree(tree),
+            &opts(&a.out, dry_run, false, CommentMode::None),
+        );
+        assert!(is_escape(&result), "dry_run={dry_run}: {result:?}");
+        assert!(outside_is_untouched(&a));
+    }
+}

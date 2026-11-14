@@ -29,8 +29,9 @@
 //! over the same path.
 
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
-    fmt::Display,
+    fmt::{Display, Write as _},
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -112,68 +113,150 @@ pub fn build(nodes: &[TreeNode], opts: &BuildOptions) -> Result<BuildStats, AppE
         fs::create_dir_all(&opts.output_root).map_err(|e| AppError::io(&opts.output_root, e))?;
     }
 
-    let mut stats = BuildStats::default();
     let resolved = resolve_paths(nodes, &opts.output_root)?;
 
-    // Everything the tree lists explicitly, files and directories alike: a
-    // generated COMMENT.md must not collide with any of it.  A listed
-    // directory named COMMENT.md would otherwise find a file in its place and
-    // abort the build.
-    let listed_paths: HashSet<&Path> = resolved.iter().map(|entry| entry.path.as_path()).collect();
+    let mut run = Run {
+        opts,
+        // Everything the tree lists explicitly, files and directories alike: a
+        // generated COMMENT.md must not collide with any of it.  A listed
+        // directory named COMMENT.md would otherwise find a file in its place
+        // and abort the build.
+        listed_paths: resolved.iter().map(|entry| entry.path.as_path()).collect(),
+        stats: BuildStats::default(),
+        planned: HashMap::new(),
+        // Created after the root so that a root which had to be made is resolved.
+        guard: RootGuard::new(&opts.output_root),
+        log: String::new(),
+        warnings: String::new(),
+        ensured: HashSet::new(),
+    };
 
-    // A dry run writes nothing, so a path it "creates" is not on disk when a
-    // later entry names it again (duplicate lines).  Remember those paths and
-    // what each would be, so the report matches what the real run, which would
-    // find them, does.
-    let mut planned: HashMap<PathBuf, EntryKind> = HashMap::new();
+    let result = resolved.iter().try_for_each(|entry| match entry.kind {
+        EntryKind::Dir => create_directory(entry, &mut run),
+        EntryKind::File => create_file(entry, &mut run),
+    });
 
-    // Created after the root so that a root which had to be made is resolved.
-    let guard = RootGuard::new(&opts.output_root);
+    // Printed even when the build failed: it says how far the dry run got.
+    print!("{}", run.log);
+    eprint!("{}", run.warnings);
+    result.map(|()| run.stats)
+}
 
-    for entry in &resolved {
-        match entry.kind {
-            EntryKind::Dir => {
-                create_directory(entry, opts, &listed_paths, &mut stats, &mut planned, &guard)?
-            }
-            EntryKind::File => create_file(entry, opts, &mut stats, &mut planned, &guard)?,
-        }
+/// Everything one build carries from entry to entry.
+struct Run<'a> {
+    opts: &'a BuildOptions,
+    listed_paths: HashSet<&'a Path>,
+    stats: BuildStats,
+    /// A dry run writes nothing, so a path it "creates" is not on disk when a
+    /// later entry names it again (duplicate lines).  Remember those paths and
+    /// what each would be, so the report matches what the real run, which
+    /// would find them, does.
+    planned: HashMap<PathBuf, EntryKind>,
+    guard: RootGuard,
+    /// The dry-run listing.  Collected and printed in one go: a line-buffered
+    /// stdout makes a system call per line, which on a console is slow for a
+    /// listing of thousands of entries.
+    log: String,
+    /// Warnings, collected for the same reason and printed to stderr after the
+    /// listing.  Unbuffered, `eprintln!` costs several system calls a line, and
+    /// a second run over a built tree warns once per existing file.
+    warnings: String,
+    /// Directories this run made or found, so a file below one needs no
+    /// `create_dir_all` of its own.
+    ensured: HashSet<PathBuf>,
+}
+
+impl Run<'_> {
+    /// Record a non-fatal warning; [`build`] prints them at the end.
+    fn warn(&mut self, message: impl Display) {
+        let _ = writeln!(self.warnings, "  ⚠  warning: {message}");
     }
-
-    Ok(stats)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Refuses writes that would leave the output root through a symbolic link.
+/// Refuses writes that would leave the output root through a symbolic link,
+/// and reports what is on disk at the same time.
+///
+/// Every filesystem call costs a system call (on Windows, usually opening a
+/// handle), and a tree can have thousands of entries, so the guard is built to
+/// ask the disk about an entry once: [`RootGuard::inspect`] both checks and
+/// returns the metadata the builder needs.
 struct RootGuard {
+    /// The output root without `.` segments, to recognise an entry that is the
+    /// root itself.
+    root: PathBuf,
     /// The output root with every link resolved; `None` when it does not exist
     /// yet (a dry run into a new directory), in which case nothing below it
     /// can be a link either.
     canonical_root: Option<PathBuf>,
+    /// Directories already resolved and found to be inside the root.  The
+    /// entries of one directory share it, so it is resolved once, not once
+    /// per entry.
+    verified: RefCell<HashSet<PathBuf>>,
 }
 
 impl RootGuard {
     fn new(root: &Path) -> Self {
         Self {
+            root: root.components().collect(),
             canonical_root: fs::canonicalize(root).ok(),
+            verified: RefCell::new(HashSet::new()),
         }
     }
 
-    /// Fail if writing `path` would end up outside the root.
+    /// Look at `path` on disk: what is there (links followed), or `None`.
     ///
-    /// The deepest existing component is found with `symlink_metadata`, which
-    /// does not follow links: a dangling link must count as existing, because
-    /// `fs::write` through it creates its target.  Resolving that component
-    /// with `canonicalize` follows every link on the way, junctions included.
+    /// Fails with [`AppError::SymlinkEscape`] if writing `path` would end up
+    /// outside the root.  Two things can lead out: a link among the
+    /// directories above `path`, and `path` itself being a link.
+    ///
+    /// - The deepest existing directory above `path` is resolved with
+    ///   `canonicalize`, which follows every link on the way (junctions
+    ///   included), and remembered.  `symlink_metadata` does not follow links,
+    ///   so a dangling link counts as existing: `fs::write` through it creates
+    ///   its target.
+    /// - `path` itself is only resolved if it is a link; a plain file or
+    ///   directory is where its (already verified) parent says it is.
+    ///
     /// A link that cannot be resolved is refused.
-    fn check(&self, path: &Path) -> Result<(), AppError> {
+    fn inspect(&self, path: &Path) -> Result<Option<fs::Metadata>, AppError> {
         let Some(root) = &self.canonical_root else {
-            return Ok(());
+            return Ok(fs::metadata(path).ok());
         };
 
-        let mut existing = path;
+        // `.` segments are not path components, so `out/.` is `out`, and its
+        // `parent()` is the directory above the root.  GNU `tree` prints a `.`
+        // as the first line, which is an entry for the output directory itself:
+        // there is nothing above it to check.
+        let components: PathBuf = path.components().collect();
+        if components == self.root {
+            return Ok(fs::metadata(path).ok());
+        }
+        if let Some(parent) = components.parent() {
+            self.verify_directory(parent, path, root)?;
+        }
+
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => match fs::canonicalize(path) {
+                Ok(real) if real.starts_with(root) => Ok(fs::metadata(path).ok()),
+                _ => Err(AppError::SymlinkEscape(path.to_path_buf())),
+            },
+            Ok(meta) => Ok(Some(meta)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Check the deepest existing part of `dir`; `whole` is the path being
+    /// written, for the error.
+    fn verify_directory(&self, dir: &Path, whole: &Path, root: &Path) -> Result<(), AppError> {
+        if self.verified.borrow().contains(dir) {
+            return Ok(());
+        }
+
+        let mut existing = dir;
         while fs::symlink_metadata(existing).is_err() {
             match existing.parent() {
                 Some(parent) => existing = parent,
@@ -181,10 +264,14 @@ impl RootGuard {
             }
         }
 
-        match fs::canonicalize(existing) {
-            Ok(real) if real.starts_with(root) => Ok(()),
-            _ => Err(AppError::SymlinkEscape(path.to_path_buf())),
+        if !self.verified.borrow().contains(existing) {
+            match fs::canonicalize(existing) {
+                Ok(real) if real.starts_with(root) => {}
+                _ => return Err(AppError::SymlinkEscape(whole.to_path_buf())),
+            }
+            self.verified.borrow_mut().insert(existing.to_path_buf());
         }
+        Ok(())
     }
 }
 
@@ -257,11 +344,6 @@ fn resolve_paths<'a>(
     Ok(paths)
 }
 
-/// Emit a non-fatal warning.  One place, so the output channel can change.
-fn warn(message: impl Display) {
-    eprintln!("  ⚠  warning: {message}");
-}
-
 /// What to do about a directory's comment.
 enum DirComment {
     /// No comment, or directory comments are off.
@@ -327,8 +409,12 @@ fn not_a_directory(path: &Path) -> AppError {
 }
 
 /// Whether `path` is, or in a dry run would by now be, a directory.
-fn is_dir_or_planned(path: &Path, planned: &HashMap<PathBuf, EntryKind>) -> bool {
-    path.is_dir() || planned.get(path) == Some(&EntryKind::Dir)
+fn is_dir_or_planned(
+    on_disk: Option<&fs::Metadata>,
+    path: &Path,
+    planned: &HashMap<PathBuf, EntryKind>,
+) -> bool {
+    on_disk.is_some_and(fs::Metadata::is_dir) || planned.get(path) == Some(&EntryKind::Dir)
 }
 
 /// One-line rendering of comment content for the dry-run report.
@@ -336,120 +422,122 @@ fn one_line(content: &str) -> String {
     content.trim_end().replace('\n', " ⏎ ")
 }
 
-fn skip_listed_comment(target: &Path, stats: &mut BuildStats) {
-    warn(format!(
+fn skip_listed_comment(target: &Path, run: &mut Run<'_>) {
+    run.warn(format!(
         "{} is listed in the tree, so its directory's comment was not written",
         target.display()
     ));
-    stats.comments_skipped += 1;
+    run.stats.comments_skipped += 1;
 }
 
-fn create_directory(
-    entry: &ResolvedEntry<'_>,
-    opts: &BuildOptions,
-    listed_paths: &HashSet<&Path>,
-    stats: &mut BuildStats,
-    planned: &mut HashMap<PathBuf, EntryKind>,
-    guard: &RootGuard,
-) -> Result<(), AppError> {
+fn create_directory(entry: &ResolvedEntry<'_>, run: &mut Run<'_>) -> Result<(), AppError> {
     let path = &entry.path;
-    guard.check(path)?;
-    let comment = plan_dir_comment(entry, opts, listed_paths);
+    let on_disk = run.guard.inspect(path)?;
+    let comment = plan_dir_comment(entry, run.opts, &run.listed_paths);
 
-    if opts.dry_run {
+    if run.opts.dry_run {
         // Same decisions as the real run below, from read-only disk checks.
         // A file on disk, or one planned earlier in this pass, makes the real
         // run's create_dir_all fail; promising success would be a lie.
-        if (path.exists() && !path.is_dir()) || planned.get(path) == Some(&EntryKind::File) {
+        let file_on_disk = on_disk.as_ref().is_some_and(|meta| !meta.is_dir());
+        if file_on_disk || run.planned.get(path) == Some(&EntryKind::File) {
             return Err(not_a_directory(path));
         }
-        let exists = is_dir_or_planned(path, planned);
-        println!(
+        let exists = is_dir_or_planned(on_disk.as_ref(), path, &run.planned);
+        let _ = writeln!(
+            run.log,
             "  [dry-run] 📁 {}{}",
             path.display(),
             if exists { " (exists)" } else { "" }
         );
         if !exists {
-            stats.dirs_created += 1;
-            planned.insert(path.clone(), EntryKind::Dir);
+            run.stats.dirs_created += 1;
+            run.planned.insert(path.clone(), EntryKind::Dir);
         }
         match comment {
             DirComment::Nothing => {}
             DirComment::Write { target, content } => {
-                guard.check(&target)?;
-                let exists = target.exists() || planned.contains_key(&target);
-                if exists && opts.force && is_dir_or_planned(&target, planned) {
+                let target_on_disk = run.guard.inspect(&target)?;
+                let exists = target_on_disk.is_some() || run.planned.contains_key(&target);
+                if exists
+                    && run.opts.force
+                    && is_dir_or_planned(target_on_disk.as_ref(), &target, &run.planned)
+                {
                     // fs::write cannot replace a directory.
                     return Err(is_a_directory(&target));
                 }
-                if exists && !opts.force {
-                    println!(
+                if exists && !run.opts.force {
+                    let _ = writeln!(
+                        run.log,
                         "              ↳ {DIR_COMMENT_FILE} exists — comment would be skipped"
                     );
-                    stats.comments_skipped += 1;
+                    run.stats.comments_skipped += 1;
                 } else {
-                    println!("              ↳ {DIR_COMMENT_FILE}: {}", one_line(&content));
-                    stats.comments_written += 1;
-                    planned.insert(target, EntryKind::File);
+                    let _ = writeln!(
+                        run.log,
+                        "              ↳ {DIR_COMMENT_FILE}: {}",
+                        one_line(&content)
+                    );
+                    run.stats.comments_written += 1;
+                    run.planned.insert(target, EntryKind::File);
                 }
             }
-            DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
+            DirComment::ListedInTree { target } => skip_listed_comment(&target, run),
         }
         return Ok(());
     }
 
     // An existing directory is not an error and is not counted, but it may
     // still receive a comment below.
-    if !path.is_dir() {
+    if !on_disk.as_ref().is_some_and(fs::Metadata::is_dir) {
         fs::create_dir_all(path).map_err(|e| AppError::io(path, e))?;
-        stats.dirs_created += 1;
+        run.stats.dirs_created += 1;
     }
+    run.ensured.insert(path.clone());
 
     match comment {
         DirComment::Nothing => {}
-        DirComment::ListedInTree { target } => skip_listed_comment(&target, stats),
+        DirComment::ListedInTree { target } => skip_listed_comment(&target, run),
         DirComment::Write { target, content } => {
-            guard.check(&target)?;
-            if target.exists() && !opts.force {
-                warn(format!(
+            if run.guard.inspect(&target)?.is_some() && !run.opts.force {
+                run.warn(format!(
                     "{} already exists, directory comment skipped (use --force to overwrite)",
                     target.display()
                 ));
-                stats.comments_skipped += 1;
+                run.stats.comments_skipped += 1;
             } else {
                 fs::write(&target, content).map_err(|e| AppError::io(&target, e))?;
-                stats.comments_written += 1;
+                run.stats.comments_written += 1;
             }
         }
     }
     Ok(())
 }
 
-fn create_file(
-    entry: &ResolvedEntry<'_>,
-    opts: &BuildOptions,
-    stats: &mut BuildStats,
-    planned: &mut HashMap<PathBuf, EntryKind>,
-    guard: &RootGuard,
-) -> Result<(), AppError> {
+fn create_file(entry: &ResolvedEntry<'_>, run: &mut Run<'_>) -> Result<(), AppError> {
     let path = &entry.path;
-    guard.check(path)?;
-    let content = file_comment_content(entry, opts);
+    let on_disk = run.guard.inspect(path)?;
+    let content = file_comment_content(entry, run.opts);
 
-    if opts.dry_run {
-        let exists = path.exists() || planned.contains_key(path);
-        if exists && opts.force && is_dir_or_planned(path, planned) {
+    if run.opts.dry_run {
+        let exists = on_disk.is_some() || run.planned.contains_key(path);
+        if exists && run.opts.force && is_dir_or_planned(on_disk.as_ref(), path, &run.planned) {
             // The real run's fs::write fails on a directory; an "overwrite"
             // would not happen.
             return Err(is_a_directory(path));
         }
-        if exists && !opts.force {
+        if exists && !run.opts.force {
             // The real run skips it, and writes no comment either.
-            println!("  [dry-run] 📄 {} (exists — would skip)", path.display());
-            stats.files_skipped += 1;
+            let _ = writeln!(
+                run.log,
+                "  [dry-run] 📄 {} (exists — would skip)",
+                path.display()
+            );
+            run.stats.files_skipped += 1;
             return Ok(());
         }
-        println!(
+        let _ = writeln!(
+            run.log,
             "  [dry-run] 📄 {}{}",
             path.display(),
             if exists {
@@ -459,34 +547,39 @@ fn create_file(
             }
         );
         if let Some(content) = &content {
-            println!("              ↳ comment: {}", one_line(content));
-            stats.comments_written += 1;
+            let _ = writeln!(run.log, "              ↳ comment: {}", one_line(content));
+            run.stats.comments_written += 1;
         }
-        stats.files_created += 1;
-        planned.insert(path.clone(), EntryKind::File);
+        run.stats.files_created += 1;
+        run.planned.insert(path.clone(), EntryKind::File);
         return Ok(());
     }
 
-    if path.exists() {
-        if opts.force {
+    if on_disk.is_some() {
+        if run.opts.force {
             // Overwrite: fall through to write.
         } else {
             // Skip with a non-fatal warning.
-            warn(AppError::FileExists(path.to_path_buf()));
-            stats.files_skipped += 1;
+            run.warn(AppError::FileExists(path.to_path_buf()));
+            run.stats.files_skipped += 1;
             return Ok(());
         }
     }
 
-    // Ensure all ancestor directories exist before writing the file.
+    // Ensure all ancestor directories exist before writing the file.  The
+    // parent is usually the directory entry just handled, so this is mostly
+    // answered from memory.
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+        if !run.ensured.contains(parent) {
+            fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            run.ensured.insert(parent.to_path_buf());
+        }
     }
 
     fs::write(path, content.as_deref().unwrap_or("")).map_err(|e| AppError::io(path, e))?;
-    stats.files_created += 1;
+    run.stats.files_created += 1;
     if content.is_some() {
-        stats.comments_written += 1;
+        run.stats.comments_written += 1;
     }
     Ok(())
 }
@@ -560,28 +653,34 @@ pub fn print_summary(
 }
 
 fn print_tree(nodes: &[TreeNode], root: &Path, _depth: usize, indent: &str) {
-    if let Ok(resolved) = resolve_paths(nodes, root) {
-        for entry in resolved {
-            let display_indent = "  ".repeat(entry.indent_level);
-            let connector = if entry.kind == EntryKind::Dir {
-                "├── 📁"
-            } else {
-                "├── 📄"
-            };
-            // Sanitised: comments come from pasted text and must not carry
-            // terminal escape sequences into the user's terminal.
-            let comment_str = entry
-                .comment
-                .map(sanitize)
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("\t# {s}"))
-                .unwrap_or_default();
-            println!(
-                "{indent}{display_indent}{connector} {}{comment_str}",
-                entry.name
-            );
-        }
+    let Ok(resolved) = resolve_paths(nodes, root) else {
+        return;
+    };
+
+    // One write for the whole tree: see Run::log.
+    let mut out = String::new();
+    for entry in resolved {
+        let display_indent = "  ".repeat(entry.indent_level);
+        let connector = if entry.kind == EntryKind::Dir {
+            "├── 📁"
+        } else {
+            "├── 📄"
+        };
+        // Sanitised: comments come from pasted text and must not carry
+        // terminal escape sequences into the user's terminal.
+        let comment_str = entry
+            .comment
+            .map(sanitize)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("\t# {s}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "{indent}{display_indent}{connector} {}{comment_str}",
+            entry.name
+        );
     }
+    print!("{out}");
 }
 
 fn pluralise<'a>(n: usize, singular: &'a str, plural: &'a str) -> &'a str {
