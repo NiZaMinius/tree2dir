@@ -2,7 +2,7 @@
 # The name of the package, matching the binary produced by `cargo build`.
 name = "tree2dir"
 # Semantic version of this release.
-version = "0.1.0"
+version = "0.2.0"
 # Rust edition — 2021 enables the resolver v2 and all modern idioms.
 edition = "2021"
 # Crate authors (used in --version output via clap).
