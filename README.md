@@ -35,7 +35,7 @@ $ tree2dir --file structure.txt
 Done in 2.5ms. Created 3 directories and 4 files.
 ```
 
-Русская версия: [README.ru.md](README.ru.md)
+Русская версия: [README.ru.md](https://github.com/NiZaMinius/tree2dir/blob/main/README.ru.md)
 
 ---
 
@@ -51,7 +51,8 @@ Done in 2.5ms. Created 3 directories and 4 files.
 - **Safe by default** — refuses to write outside the target directory
   (path-traversal guard), skips existing files unless `--force` is passed,
   and supports `--dry-run` to preview without touching disk.
-- **Fast** — typical trees build in single-digit milliseconds.
+- **Small and self-contained** — a single binary; there is no runtime or
+  other tool to install.
 - **Inline comments** — `main.rs # entry point` just works: the comment never
   ends up in the file name. Opt in with `--comments` to save it, in the
   file's own comment syntax or in a `COMMENT.md` for directories
@@ -63,7 +64,7 @@ Done in 2.5ms. Created 3 directories and 4 files.
 cargo install tree2dir
 ```
 
-Or download a prebuilt binary from the [Releases page](../../releases) for
+Or download a prebuilt binary from the [Releases page](https://github.com/NiZaMinius/tree2dir/releases) for
 Linux, macOS, or Windows.
 
 ## Usage
@@ -246,11 +247,11 @@ cargo test
 
 ## Contributing
 
-Issues and pull requests are welcome — see [Discussions](../../discussions)
+Issues and pull requests are welcome — see [Discussions](https://github.com/NiZaMinius/tree2dir/discussions)
 for questions or ideas before opening a PR. Please run `cargo fmt` and
 `cargo clippy -- -D warnings` before submitting.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/NiZaMinius/tree2dir/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/NiZaMinius/tree2dir/blob/main/LICENSE-MIT) at your option.
