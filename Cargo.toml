@@ -72,6 +72,7 @@ is-terminal = "0.4"
 # assert_cmd — ergonomic integration testing of CLI binaries; spawns the
 # compiled binary and asserts on its exit status and stdout/stderr.
 assert_cmd = "2.0"
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 
 # predicates — composable boolean predicates used alongside assert_cmd for
 # flexible output matching (e.g., `contains`, `is_match`).
@@ -80,3 +81,8 @@ predicates = "3.0"
 # tempfile — creates temporary directories and files that are automatically
 # cleaned up after each test, preventing test pollution.
 tempfile = "3.8"
+
+# Benchmarks use criterion's own harness, not libtest's.
+[[bench]]
+name = "parse_and_build"
+harness = false
