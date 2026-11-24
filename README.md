@@ -53,6 +53,10 @@ Done in 2.5ms. Created 3 directories and 4 files.
   and supports `--dry-run` to preview without touching disk.
 - **Small and self-contained** — a single binary; there is no runtime or
   other tool to install.
+- **Quick** — a thousand lines parse in well under a millisecond (about 0.1 ms
+  on the Linux benchmark machine, 0.5 ms on Windows). Creating the files is
+  limited by the filesystem and differs a lot between systems. Method and
+  numbers: [benches/README.md](https://github.com/NiZaMinius/tree2dir/blob/main/benches/README.md).
 - **Inline comments** — `main.rs # entry point` just works: the comment never
   ends up in the file name. Opt in with `--comments` to save it, in the
   file's own comment syntax or in a `COMMENT.md` for directories
