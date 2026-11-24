@@ -81,3 +81,8 @@ predicates = "3.0"
 # tempfile — creates temporary directories and files that are automatically
 # cleaned up after each test, preventing test pollution.
 tempfile = "3.8"
+
+# Benchmarks use criterion's own harness, not libtest's.
+[[bench]]
+name = "parse_and_build"
+harness = false
